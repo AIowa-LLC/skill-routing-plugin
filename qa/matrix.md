@@ -194,3 +194,76 @@ SPEC-3 **D5 (core-upgrade dormancy) arriving for real**:
 Re-baselining A-rows against enforcing core (and the default-ON posture
 decision vs core default-OFF) is a spec/verification question for QA, not a
 repair. Matrix rows should pin `SORE_CORE_ROOT` to the certifying core.
+
+---
+
+## Run 4 — 2026-08-24 ~11:0x CDT (QA independent re-verification, t_2f4cee94)
+
+Candidate: plugin master @ `b017de0` (clean tree; fix `b950d21` and evidence
+`b017de0` both verified ancestors of HEAD). Core: **pinned `057dcdf236`** via
+`SORE_CORE_ROOT=/tmp/core-morning-057dcdf` (worktree recreated this run —
+/tmp had been swept since Run 3). **Import pin proven by probe**: under the
+pin, `tools.skill_manager_tool` resolves from the worktree and LACKS the PR
+symbols; unpinned it resolves from live `809e94ca4c` WITH them (the pin
+shadows both pytest.ini pythonpath and the venv editable install).
+
+Commands + results (venv Python 3.11.15, Linux 7.1.3-arch2-2):
+- pinned `pytest tests/ -q` → **170 passed** (run twice: 2.25s / 1.93s — deterministic)
+- pinned `pytest tests/qa/ -q` → 55 passed (Gate A 32/32, Gate B 12/12, self-check 11/11)
+- unpinned `pytest tests/qa/ -q` → **18 failed / 37 passed** — failure set
+  identical to Run 3's live-core note: 16 create-gate deny-expectation rows
+  (A1, A3, A4, A5, A6×3, A6b×6, A7, A8c, A9b) defeated by dormancy +
+  A8b posture divergence + self-check anchor
+- live-core behavior probes (temp HERMES_HOME, real core `skill_manage`):
+  - key ABSENT → plugin reads `enabled:False` (core defaults merged through
+    `load_config`); create lands LOCALLY despite `owner_profile:trt`
+  - `enabled:true` → dormancy fires; plugin gate returns None (no
+    double-deny); **core itself performs the routed create** (success, lands
+    in trt home)
+  - `enabled:false` → plugin and core both bypass identically
+
+### F1/F2/F3 re-verification — all PASS
+- **F1**: "Hand the skill creation to" present in `gate.py` default→specialist
+  redirect (A3 sideways message also carries it). A1/A9b green.
+- **F2**: SPEC-3 A8c amendment mirrors upstream `e12d79edd1` test exactly
+  (`success:false` + "configured to refuse cross-profile creation" +
+  `create.assert_not_called()`); engine text matches; test asserts deny +
+  refusal substring + neither local nor routed landing. Drift rationale sound
+  (a local create of an owner-declared skill is instant B1 drift).
+- **F3**: `unowned` is the SPEC-0 Interface 3 enum kind; `unjustified-global`
+  never existed in the enum. test_B1c exact-matches.
+- **Harness seam**: `get_routed_create` now probes
+  `skill_owner_routing.register`; A9b round trip green.
+- `dashboard/manifest.json` committed in b950d21 and tracked. ✓
+
+### F5 RULING (QA — core #87101 merged mid-cycle)
+- **R1 — certification stays pinned to the pre-#87101 core.** Gate A
+  certifies PLUGIN enforcement semantics; on enforcing cores the create gate
+  is dormant by design, so those rows are only meaningfully testable against
+  a pre-#87101 core. The 18 live-core failures are SPEC-3 D5 arriving live,
+  NOT regressions of b950d21. Every future run header records
+  `SORE_CORE_ROOT` + the resolved import root.
+- **R2 — posture**: on cores ≥ #87101, ACCEPT merged-defaults semantics
+  (absent key = disabled; fleets opt in via explicit `enabled:true`).
+  Single-reader coexistence outranks install-time default-ON; the
+  alternative (direct-YAML-file read resurrecting default-ON on new cores)
+  makes one config mean two things and reverses the documented Tony ruling —
+  needs Tony sign-off if ever wanted. A8b/D4b re-baseline
+  core-generation-conditional. [amendment → developer]
+- **R3 — D5 provenance wording**: upstream core does NOT deny under
+  `route_from_default:true` — it performs the routed create itself (probe
+  evidence above). Re-word D5: "a create attempt yields at most ONE
+  enforcement action originating from core (routed create OR denial);
+  plugin gate returns None and audit-logs only". D5/D5b/D5c are now runnable
+  for real at Gate D (QA-L3) against `809e94ca4c`+. [amendment → developer]
+
+### New Low findings (non-blocking, route: developer)
+- **L1**: `tests/qa/conftest.py` hardcodes `CORE` to the live checkout — the
+  fingerprint self-test printed `CORE=809e94ca4c` during a provably pinned
+  run. Derive `CORE` from `SORE_CORE_ROOT` when set.
+- **L2**: `test_A8c_route_from_default_false_stays_on_default` name predates
+  the F2 amendment (behavior is now DENY); rename at convenience.
+
+**VERDICT: PASS (QA-L2)** — BUILD-4 Gate A/B accepted vs pinned core
+`057dcdf236`; F1/F2/F3 fixed; F5 ruled (not a candidate defect). Gate C/D
+remain release-gate scope per Run 1 notes.
