@@ -80,7 +80,11 @@ def _registration_context() -> Optional[RecordingContext]:
     import importlib
 
     ensure_engine_importable()
-    for modname in ("skill_owner_routing.plugin", "skill_owner_routing"):
+    for modname in (
+        "skill_owner_routing.plugin",
+        "skill_owner_routing.register",
+        "skill_owner_routing",
+    ):
         try:
             mod = importlib.import_module(modname)
         except ImportError:

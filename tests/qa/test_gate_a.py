@@ -41,6 +41,7 @@ from qa import hook_driver as hd
 from qa.contracts import (
     MSG_HANDOFF,
     MSG_NOT_REGISTERED,
+    MSG_REFUSE_ROUTE,
     MSG_REQUIRE_METADATA_SHORT,
     MSG_RESOLVE_OWNER,
     MSG_SIDEWAYS,
@@ -349,16 +350,18 @@ def test_A8b_key_absent_means_enabled(gate, fleet):
 
 
 def test_A8c_route_from_default_false_stays_on_default(gate, fleet):
+    # SPEC-3 A8c (amended 2026-08-24, t_4f4ff38c): refusal posture matches
+    # upstream e12d79edd1 — explicit refuse → DENY, delegate message, and
+    # nothing lands anywhere (no local create, no route).
     write_default_config(fleet, enabled=True, require_owner_metadata=True, route_from_default=False)
     switch_profile("default", fleet)
     d = decide(gate, "create", content=OWNER_ROUTED_SKILL_CONTENT)
-    assert not hd.is_block(d), "refusal posture must not deny the create (SPEC-3 A8c)"
+    assert hd.is_block(d), "refusal posture must DENY the create (amended A8c)"
+    assert MSG_REFUSE_ROUTE in hd.block_message(d)
 
-    res = core_skill_manage("create", "routed-skill", OWNER_ROUTED_SKILL_CONTENT)
-    assert res["success"] is True, res
     stayed = fleet / "skills" / "routed-skill" / "SKILL.md"
     routed = profile_home(fleet, "trt") / "skills" / "routed-skill" / "SKILL.md"
-    assert stayed.is_file(), "plain create must stay under default home"
+    assert not stayed.exists(), "no local create may occur under route_from_default=false"
     assert not routed.exists(), "no routing may occur under route_from_default=false"
 
 

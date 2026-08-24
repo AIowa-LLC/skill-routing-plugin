@@ -113,9 +113,10 @@ def _gate_create(args: Dict[str, Any], name: str) -> Optional[Dict[str, str]]:
     if pol.get("route_from_default", True):
         return _block(
             f"Skill {name!r} belongs to owner profile {owner!r}. Default must "
-            f"not create it locally. Use the skill_owner_create tool "
-            f"(name={name!r}, content with metadata.hermes.owner_profile="
-            f"{owner!r}) to run the routed create into {owner!r}'s home."
+            f"not create it locally. Hand the skill creation to the "
+            f"skill_owner_create tool (name={name!r}, content with "
+            f"metadata.hermes.owner_profile={owner!r}) to run the routed "
+            f"create into {owner!r}'s home."
         )
     return _block(
         f"Skill {name!r} belongs to {owner!r}. Default owner-routing is "

@@ -29,7 +29,7 @@ each gate must produce. QA owns verdicts (PASS/HOLD/BLOCKED), not repairs.
 | A7b | core enforces (simulated) | plugin create-gate DORMANT (audit-only, no deny; dormancy logged once, not per-call) |
 | A8 | `enabled: false` explicit | full bypass incl. drifted legacy skills |
 | A8b | key absent + plugin installed | ENABLED (default-ON posture) |
-| A8c | `route_from_default: false` + default create, owner=trt | plain create stays under default (refusal posture; no deny, no route) |
+| A8c | `route_from_default: false` + default create, owner=trt | DENY + "configured to refuse cross-profile creation; delegate the create." (amended 2026-08-24 t_4f4ff38c: matches upstream e12d79edd1 refusal semantics — explicit refuse denies the create entirely; nothing lands locally and nothing routes) |
 | A8d | `require_owner_metadata: false` + create w/o owner | allowed; unowned skill created (surfaces as V1 `unowned` row state) |
 | A8e | default + create, owner=default | plain create under default (owner==default is not a route) |
 | A9 | decision latency | p95 <50ms over N≥1000 non-skill_manage pre_tool_call calls; early-bail does zero filesystem/config I/O (assert no open/read, not just timing) |
@@ -37,14 +37,15 @@ each gate must produce. QA owns verdicts (PASS/HOLD/BLOCKED), not repairs.
 
 Message-contract assertions pin stable upstream substrings, not full strings:
 "may not write skills sideways" (A3), "is not registered" (A5),
-"owner_profile" (A4), "Hand the skill creation to" (A3/A9b deny-redirect).
+"owner_profile" (A4), "Hand the skill creation to" (A3/A9b deny-redirect),
+"refuse cross-profile creation" (A8c refusal deny).
 
 ## Gate B — Drift watchdog (rebuilt, no upstream basis)
 | # | Scenario | Expected |
 |---|---|---|
 | B1 | skill in wrong profile vs owner_profile | finding: drifted |
 | B1b | global skill w/ owner_profile set (hoarding signal) | finding: misplaced-global |
-| B1c | global-scope skill, no owner_profile, no justification | finding: unjustified-global (hoarding lint, SPEC-1 §4) |
+| B1c | global-scope skill, no owner_profile, no justification | finding: unowned (hoarding lint, SPEC-1 §4; label amended 2026-08-24 t_4f4ff38c — SPEC-0 Interface 3 enum is binding and has no `unjustified-global` kind) |
 | B1d | global-scope skill w/ valid justification (control-plane / shared-primitive / verified-structural-dependency) | clean — no finding |
 | B2 | owner id not a registered profile | finding: unknown-owner |
 | B2b | global copy + profile copy both exist | finding: duplicate/hoarding |

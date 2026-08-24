@@ -101,8 +101,9 @@ def test_B1c_unjustified_global_flagged(fleet_b):
     findings = scan(fleet_b)
     f = one_finding(findings, "bare-global")
     hd.assert_valid_finding(f)
-    assert f["kind"] in ("unjustified-global", "unowned"), (
-        f"B1c hoarding-lint kind diverges from both SPEC-3 label and SPEC-0 enum: {f}"
+    assert f["kind"] == "unowned", (
+        f"B1c hoarding-lint kind must be the SPEC-0 enum 'unowned' "
+        f"(SPEC-3 B1c label amended 2026-08-24): {f}"
     )
 
 
