@@ -1,0 +1,321 @@
+"""Drift watchdog + hoarding lint + ledger tests (SPEC-3 Gate B).
+
+Copyright (c) 2026 skill-owner-routing contributors. MIT licensed.
+"""
+
+import json
+
+from conftest import write_skill
+
+
+def run_scan():
+    from skill_owner_routing import drift
+
+    return drift.scan()
+
+
+class TestDriftScan:
+    def test_clean_fleet_produces_no_open_findings(self, fleet):
+        write_skill(fleet["trt"], "trt-skill", owner="trt")
+        write_skill(fleet["root"], "core-skill")  # unowned but... see hoarding
+        result = run_scan()
+        kinds = {(f["kind"], f["skill"]) for f in result["findings"]}
+        # core-skill has no owner and no justification → hoarding finding
+        assert ("unowned", "core-skill") in kinds
+        assert ("drifted", "trt-skill") not in kinds
+
+    def test_drifted_skill_detected(self, fleet):
+        # B1: skill in wrong profile vs owner_profile
+        write_skill(fleet["growth"], "misplaced", owner="trt")
+        result = run_scan()
+        finding = next(f for f in result["findings"] if f["skill"] == "misplaced")
+        assert finding["kind"] == "drifted"
+        assert finding["severity"] == "high"
+        assert finding["expected_owner"] == "trt"
+        assert finding["actual"] == "growth"
+        assert finding["status"] == "open"
+
+    def test_misplaced_global_detected(self, fleet):
+        # B1b: global skill w/ owner_profile set
+        write_skill(fleet["root"], "hoarder", owner="trt")
+        result = run_scan()
+        finding = next(f for f in result["findings"] if f["skill"] == "hoarder")
+        assert finding["kind"] == "misplaced-global"
+
+    def test_unknown_owner_detected(self, fleet):
+        # B2: owner id not a registered profile
+        write_skill(fleet["trt"], "ghost-owned", owner="missing-profile")
+        result = run_scan()
+        finding = next(f for f in result["findings"] if f["skill"] == "ghost-owned")
+        assert finding["kind"] == "unknown-owner"
+
+    def test_duplicate_global_and_profile_detected(self, fleet):
+        # B2b: global copy + profile copy both exist
+        write_skill(fleet["root"], "twin")
+        write_skill(fleet["trt"], "twin")
+        result = run_scan()
+        dupes = [f for f in result["findings"] if f["kind"] == "duplicate/hoarding"]
+        assert any(f["skill"] == "twin" for f in dupes)
+
+    def test_category_nested_skills_discovered(self, fleet):
+        content = (
+            "---\nname: nested\ndescription: x.\nmetadata:\n  hermes:\n"
+            "    owner_profile: trt\n---\n\nBody\n"
+        )
+        skill_dir = fleet["growth"] / "skills" / "devops" / "nested"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+        result = run_scan()
+        assert any(f["skill"] == "nested" for f in result["findings"])
+
+    def test_findings_use_canonical_shape(self, fleet):
+        # SPEC-0 Interface 3: BINDING record shape + kind enum
+        write_skill(fleet["growth"], "misplaced", owner="trt")
+        result = run_scan()
+        finding = next(f for f in result["findings"] if f["skill"] == "misplaced")
+        assert set(finding.keys()) == {
+            "id", "kind", "severity", "skill", "expected_owner",
+            "actual", "proposed_fix", "discovered_at", "status",
+        }
+        valid_kinds = {
+            "drifted", "misplaced-global", "unknown-owner",
+            "duplicate/hoarding", "unowned",
+        }
+        for f in result["findings"]:
+            assert f["kind"] in valid_kinds
+
+    def test_deterministic_ids_across_rescans(self, fleet):
+        # D3: two audits of same state → identical findings (ex timestamps)
+        write_skill(fleet["growth"], "misplaced", owner="trt")
+        first = run_scan()["findings"]
+        second = run_scan()["findings"]
+        strip = lambda fs: sorted(
+            (f["id"], f["kind"], f["skill"], f["actual"]) for f in fs
+        )
+        assert strip(first) == strip(second)
+
+    def test_rescan_is_idempotent_in_ledger(self, fleet):
+        write_skill(fleet["growth"], "misplaced", owner="trt")
+        run_scan()
+        run_scan()
+        from skill_owner_routing import ledger
+
+        ids = [f["id"] for f in ledger.load_findings()]
+        assert len(ids) == len(set(ids))
+
+    def test_scan_updates_mutation_index(self, fleet):
+        write_skill(fleet["trt"], "indexed-skill", owner="trt")
+        run_scan()
+        from skill_owner_routing import index
+
+        found = index.lookup("indexed-skill")
+        assert found is not None and found.parent.name == "indexed-skill"
+
+    def test_scan_performance_500_skills(self, fleet):
+        # B3: N=500 completes <10s
+        import time
+
+        for i in range(500):
+            write_skill(fleet["trt"], f"bulk-{i}", owner="trt")
+        start = time.perf_counter()
+        result = run_scan()
+        elapsed = time.perf_counter() - start
+        assert result["scanned"] >= 500
+        assert elapsed < 10.0, f"scan took {elapsed:.1f}s"
+
+
+class TestHoardingLint:
+    def test_unjustified_global_flagged(self, fleet):
+        write_skill(fleet["root"], "loose-skill")
+        result = run_scan()
+        assert any(
+            f["kind"] == "unowned" and f["skill"] == "loose-skill"
+            for f in result["findings"]
+        )
+
+    def test_control_plane_justification_clean(self, fleet):
+        write_skill(
+            fleet["root"],
+            "fleet-cli",
+            extra_fm="    global_justification: control-plane\n",
+        )
+        result = run_scan()
+        assert not any(f["skill"] == "fleet-cli" for f in result["findings"])
+
+    def test_shared_primitive_justification_clean(self, fleet):
+        write_skill(
+            fleet["root"],
+            "shared-lib",
+            extra_fm="    global_justification: shared-primitive\n",
+        )
+        result = run_scan()
+        assert not any(f["skill"] == "shared-lib" for f in result["findings"])
+
+    def test_structural_dependency_justification_clean(self, fleet):
+        write_skill(
+            fleet["root"],
+            "structural",
+            extra_fm="    global_justification: verified-structural-dependency\n",
+        )
+        result = run_scan()
+        assert not any(f["skill"] == "structural" for f in result["findings"])
+
+    def test_bogus_justification_flagged(self, fleet):
+        write_skill(
+            fleet["root"], "bogus", extra_fm="    global_justification: vibes\n"
+        )
+        result = run_scan()
+        assert any(
+            f["kind"] == "unowned" and f["skill"] == "bogus"
+            for f in result["findings"]
+        )
+
+    def test_body_marker_justification_accepted(self, fleet):
+        skill_dir = fleet["root"] / "skills" / "marked"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: marked\ndescription: x.\n---\n\n"
+            "Global justification: shared-primitive\n",
+            encoding="utf-8",
+        )
+        result = run_scan()
+        assert not any(f["skill"] == "marked" for f in result["findings"])
+
+
+class TestLedger:
+    def test_ledger_lands_in_default_home(self, fleet):
+        write_skill(fleet["growth"], "misplaced", owner="trt")
+        run_scan()
+        ledger_path = fleet["root"] / "skills" / ".skill_owner_findings.json"
+        assert ledger_path.is_file()
+        data = json.loads(ledger_path.read_text(encoding="utf-8"))
+        assert any(f["skill"] == "misplaced" for f in data["findings"])
+
+    def test_resolved_status_survives_rescan(self, fleet):
+        write_skill(fleet["growth"], "misplaced", owner="trt")
+        run_scan()
+        from skill_owner_routing import ledger
+
+        target = next(
+            f for f in ledger.load_findings() if f["skill"] == "misplaced"
+        )
+        ledger.update_status(target["id"], "resolved")
+        run_scan()  # drift still present
+        after = next(
+            f for f in ledger.load_findings() if f["skill"] == "misplaced"
+        )
+        assert after["status"] == "resolved"
+
+    def test_fixed_drift_leaves_ledger(self, fleet):
+        from conftest import write_skill as ws
+
+        skill_md = ws(fleet["growth"], "fixed", owner="trt")
+        run_scan()
+        skill_md.unlink()  # drift removed
+        run_scan()
+        from skill_owner_routing import ledger
+
+        assert not any(f["skill"] == "fixed" for f in ledger.load_findings())
+
+    def test_audit_tool_returns_json(self, fleet):
+        write_skill(fleet["growth"], "misplaced", owner="trt")
+        from skill_owner_routing.drift import run_audit
+
+        result = json.loads(run_audit())
+        assert result["ok"] is True
+        assert result["counts"]["open"] >= 1
+        assert "run_id" in result
+
+
+class TestCoexistence:
+    def test_dormancy_when_core_enforces(self, fleet, enabled_config, monkeypatch):
+        # A7b/D5: core symbol + core enabled → create gate DORMANT
+        import tools.skill_manager_tool as smt
+
+        monkeypatch.setattr(
+            smt, "_skill_owner_routing_policy", lambda: {"enabled": True}, raising=False
+        )
+        from conftest import OWNER_ROUTED_SKILL_CONTENT
+        from skill_owner_routing import common
+        from skill_owner_routing.gate import pre_tool_call
+
+        common.reset_caches()
+        result = pre_tool_call(
+            tool_name="skill_manage",
+            args={"action": "create", "name": "x", "content": OWNER_ROUTED_SKILL_CONTENT},
+        )
+        assert result is None  # dormant: no deny from plugin
+
+    def test_no_dormancy_when_core_symbol_absent(self, fleet, enabled_config):
+        # Current core (no #87101) → gate stays active
+        import tools.skill_manager_tool as smt
+
+        assert not hasattr(smt, "_skill_owner_routing_policy") or _core_disabled()
+        from conftest import OWNER_ROUTED_SKILL_CONTENT
+        from skill_owner_routing.gate import pre_tool_call
+
+        result = pre_tool_call(
+            tool_name="skill_manage",
+            args={"action": "create", "name": "x", "content": OWNER_ROUTED_SKILL_CONTENT},
+        )
+        assert result is not None and result["action"] == "block"
+
+    def test_partial_core_policy_disabled_stays_active(self, fleet, enabled_config, monkeypatch):
+        # D5b: symbol present but core policy disabled → plugin active
+        import tools.skill_manager_tool as smt
+
+        monkeypatch.setattr(
+            smt, "_skill_owner_routing_policy", lambda: {"enabled": False}, raising=False
+        )
+        from conftest import OWNER_ROUTED_SKILL_CONTENT
+        from skill_owner_routing import common, coexistence
+        from skill_owner_routing.gate import pre_tool_call
+
+        common.reset_caches()
+        assert coexistence.create_gate_dormant() is False
+        result = pre_tool_call(
+            tool_name="skill_manage",
+            args={"action": "create", "name": "x", "content": OWNER_ROUTED_SKILL_CONTENT},
+        )
+        assert result is not None and result["action"] == "block"
+
+    def test_dormancy_reactivates_after_core_removed(self, fleet, enabled_config, monkeypatch):
+        # D5c: no zombie dormancy cache
+        import tools.skill_manager_tool as smt
+
+        monkeypatch.setattr(
+            smt, "_skill_owner_routing_policy", lambda: {"enabled": True}, raising=False
+        )
+        from skill_owner_routing import common, coexistence
+
+        common.reset_caches()
+        assert coexistence.create_gate_dormant() is True
+        monkeypatch.delattr(smt, "_skill_owner_routing_policy", raising=False)
+        # probe cache is time-boxed; force expiry
+        from skill_owner_routing import coexistence as co
+
+        co._CORE_PROBE_CACHE.clear()
+        assert coexistence.create_gate_dormant() is False
+
+    def test_dormancy_logs_once(self, fleet, enabled_config, monkeypatch):
+        import tools.skill_manager_tool as smt
+
+        monkeypatch.setattr(
+            smt, "_skill_owner_routing_policy", lambda: {"enabled": True}, raising=False
+        )
+        from skill_owner_routing import coexistence
+
+        coexistence._DORMANT_STATE.clear()
+        coexistence._CORE_PROBE_CACHE.clear()
+        assert coexistence.mark_dormancy_logged() is True
+        assert coexistence.mark_dormancy_logged() is False
+
+
+def _core_disabled() -> bool:
+    try:
+        import tools.skill_manager_tool as smt
+
+        policy = smt._skill_owner_routing_policy()
+        return not policy.get("enabled")
+    except Exception:
+        return True

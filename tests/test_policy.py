@@ -1,0 +1,96 @@
+"""Policy contract tests (SPEC-1 config contract, SPEC-3 A7/A8 family).
+
+Copyright (c) 2026 skill-owner-routing contributors. MIT licensed.
+"""
+
+import json
+
+from conftest import write_skill  # noqa: F401
+
+
+def _read_policy():
+    from skill_owner_routing import policy
+
+    return policy.read_policy()
+
+
+class TestPolicyContract:
+    def test_absent_key_means_enabled(self, fleet):
+        # A8b: key absent + plugin installed → ENABLED (default-ON posture)
+        assert _read_policy()["enabled"] is True
+
+    def test_explicit_false_disables(self, fleet):
+        fleet["root"].joinpath("config.yaml").write_text(
+            "skills:\n  owner_routing:\n    enabled: false\n", encoding="utf-8"
+        )
+        assert _read_policy()["enabled"] is False
+
+    def test_explicit_true_enables_with_subkeys(self, fleet):
+        fleet["root"].joinpath("config.yaml").write_text(
+            "skills:\n"
+            "  owner_routing:\n"
+            "    enabled: true\n"
+            "    require_owner_metadata: false\n"
+            "    route_from_default: false\n",
+            encoding="utf-8",
+        )
+        pol = _read_policy()
+        assert pol == {
+            "enabled": True,
+            "require_owner_metadata": False,
+            "route_from_default": False,
+        }
+
+    def test_partial_key_uses_defaults(self, fleet):
+        fleet["root"].joinpath("config.yaml").write_text(
+            "skills:\n  owner_routing:\n    route_from_default: false\n",
+            encoding="utf-8",
+        )
+        pol = _read_policy()
+        assert pol["enabled"] is True  # absent sub-key keeps default-ON
+        assert pol["route_from_default"] is False
+        assert pol["require_owner_metadata"] is True
+
+    def test_boolean_shorthand(self, fleet):
+        fleet["root"].joinpath("config.yaml").write_text(
+            "skills:\n  owner_routing: true\n", encoding="utf-8"
+        )
+        pol = _read_policy()
+        assert pol["enabled"] is True
+        assert pol["route_from_default"] is True
+
+    def test_malformed_key_falls_back_to_defaults(self, fleet):
+        fleet["root"].joinpath("config.yaml").write_text(
+            "skills:\n  owner_routing: [garbage]\n", encoding="utf-8"
+        )
+        assert _read_policy()["enabled"] is True
+
+    def test_policy_is_read_from_default_home_not_profile(self, fleet, monkeypatch):
+        # A7: a specialist weakening its own config does NOT weaken the rule
+        fleet["root"].joinpath("config.yaml").write_text(
+            "skills:\n  owner_routing:\n    enabled: true\n", encoding="utf-8"
+        )
+        fleet["trt"].joinpath("config.yaml").write_text(
+            "skills:\n  owner_routing:\n    enabled: false\n", encoding="utf-8"
+        )
+        import hermes_constants
+
+        # Simulate running inside the trt profile home
+        monkeypatch.setenv("HERMES_HOME", str(fleet["trt"]))
+        pol = _read_policy()
+        assert pol["enabled"] is True  # fleet rule from DEFAULT home wins
+        monkeypatch.setenv("HERMES_HOME", str(fleet["root"]))
+
+    def test_mtime_cache_invalidates_on_change(self, fleet):
+        import time
+
+        cfg = fleet["root"].joinpath("config.yaml")
+        cfg.write_text(
+            "skills:\n  owner_routing:\n    enabled: true\n", encoding="utf-8"
+        )
+        assert _read_policy()["enabled"] is True
+        time.sleep(0.01)
+        cfg.write_text(
+            "skills:\n  owner_routing:\n    enabled: false\n", encoding="utf-8"
+        )
+        assert _read_policy()["enabled"] is False

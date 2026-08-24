@@ -1,0 +1,11 @@
+name: skill-owner-routing
+version: 0.1.0
+description: "Fleet skill ownership enforcement: creation routing, sideways-write denial, ownership drift watchdog, No-Specialist-Hoarding lint."
+author: skill-owner-routing contributors
+license: MIT
+kind: standalone
+provides_hooks:
+  - pre_tool_call
+provides_tools:
+  - skill_owner_create
+  - skill_owner_audit
