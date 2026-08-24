@@ -77,18 +77,38 @@ def declared_skill_owner_from(frontmatter: Dict[str, Any]) -> Optional[str]:
 
 
 def _all_homes() -> List[Tuple[str, Path]]:
-    """(scope, home) pairs: default home + every profile dir (bounded)."""
+    """(scope, home) pairs: default home + every profile dir (bounded).
+
+    Profiles whose ``skills`` directory resolves INTO the default home's
+    skills directory are skipped: the default profile conventionally
+    symlinks ``profiles/default/skills -> ../../skills`` (global skills ARE
+    default's skills). Scanning both would double-count every global skill
+    and manufacture phantom duplicate/drift findings for a single physical
+    file.
+    """
     homes: List[Tuple[str, Path]] = []
     default_home = fleet_default_home()
     homes.append(("default", default_home))
+    try:
+        default_skills_real = (default_home / "skills").resolve()
+    except OSError:
+        default_skills_real = None
     profiles_root = default_home / "profiles"
     try:
         children = sorted(profiles_root.iterdir())
     except OSError:
         children = []
     for child in children[:_MAX_PROFILES]:
-        if child.is_dir():
-            homes.append((child.name, child))
+        if not child.is_dir():
+            continue
+        if default_skills_real is not None:
+            try:
+                child_skills_real = (child / "skills").resolve()
+            except OSError:
+                child_skills_real = None
+            if child_skills_real == default_skills_real:
+                continue  # symlinked onto the global/default skills dir
+        homes.append((child.name, child))
     return homes
 
 
