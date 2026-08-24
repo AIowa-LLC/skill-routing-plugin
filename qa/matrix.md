@@ -146,3 +146,51 @@ the surviving tree before delivery.
 - `tests/qa/test_harness_selfcheck.py` — 11 harness self-tests (engine-independent)
 - `tests/qa/conftest.py` — QA fleet fixture (real active-profile inference; deliberately shadows dev fixture)
 - `qa/run_gates.sh` — fingerprinted runner (core commit, plugin commit, OS, Python)
+
+---
+
+## Run 3 — 2026-08-24 ~10:20 CDT (post-repair; t_4f4ff38c)
+
+Candidate: plugin `b950d21` (clean tree), core **`057dcdf236`** (pinned via
+`SORE_CORE_ROOT=/tmp/core-morning-057dcdf` worktree), Linux 7.1.3-arch2-2,
+Python 3.11.15.
+
+### Repairs delivered (F1/F2/F3 + manifest + harness)
+- **F1**: engine deny-redirect message now carries pinned phrase
+  "Hand the skill creation to" ahead of skill_owner_create guidance
+  (`gate.py`, one block message).
+- **F2 ruling**: SPEC-3 A8c amended to upstream e12d79edd1 refusal
+  semantics (route_from_default:false → DENY + "refuse cross-profile
+  creation; delegate the create"); test_A8c updated; substring added to
+  SPEC-3 message-contract list.
+- **F3**: SPEC-3 B1c relabeled to SPEC-0 enum kind `unowned`; test_B1c
+  exact-matches the enum.
+- **Harness (latent)**: `get_routed_create` seam never found
+  `skill_owner_routing.register.register()` (probed only `.plugin` /
+  `__init__`), falling back to the raw `routed_create()` function and
+  TypeError-ing on the args-dict call — unmasked by F1 because A1/A9b
+  previously failed earlier at the message assertion. Seam fixed.
+- `dashboard/manifest.json` committed (BUILD-2 e708d06 referenced it,
+  never committed it).
+
+### Result
+`bash /tmp/repair_evidence.sh` (full `tests/`, pinned core): **170 passed,
+0 failed** (was 3 failed / 167 passed pre-repair). Gate A 32/32, Gate B
+12/12, self-check 11/11, dev suite 115/115.
+
+### NEW FINDING (out of repair scope → F5, routed to owner)
+The local core checkout moved `057dcdf236` → `809e94ca4c` at 10:04 CDT
+today (desktop offbox work). New core contains **merged PR #87101**
+(`f54a6a729b` "feat(skills): route learned skills by owner profile":
+`config_defaults.py` ships `skills.owner_routing.enabled: False`;
+`tools/skill_manager_tool` carries the routing symbols). Running the same
+harness against that core: 18 failed / 37 passed in `tests/qa/` — this is
+SPEC-3 **D5 (core-upgrade dormancy) arriving for real**:
+- absent-key=ENABLED diverges (core defaults supply `enabled: False`);
+- dormancy probe fires (create gate returns None — no double-deny, working
+  as designed) so A1–A9b deny assertions fail while core's own routing
+  enforces instead;
+- self-check `test_installed_core_lacks_pr_symbols` now false by design.
+Re-baselining A-rows against enforcing core (and the default-ON posture
+decision vs core default-OFF) is a spec/verification question for QA, not a
+repair. Matrix rows should pin `SORE_CORE_ROOT` to the certifying core.
