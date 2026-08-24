@@ -7,6 +7,14 @@ plugin treats the key ABSENT as ENABLED — installing the plugin is the
 opt-in (Tony ruling: default-ON once installed, user-disable via explicit
 ``skills.owner_routing.enabled: false``). Core treats absent = disabled.
 Both honor an explicit value identically.
+
+CORE-GENERATION BOUNDARY: on cores ≥ #87101, core ships
+``skills.owner_routing.enabled: False`` in its defaults, merged through
+``load_config``. The plugin's absent-key=ENABLED posture is structurally
+unreachable on those cores — fleets opt in via explicit
+``skills.owner_routing.enabled: true``. The plugin's own DEFAULTS dict
+only governs pre-#87101 cores where the key is genuinely absent from the
+config file.
 """
 
 from __future__ import annotations

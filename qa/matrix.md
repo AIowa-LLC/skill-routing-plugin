@@ -21,8 +21,8 @@ Row maps: `tests/qa/test_gate_a.py::test_<row>` and `tests/qa/test_gate_b.py::te
 | A7 | policy read from DEFAULT config | specialist weakening ignored | test_A7_policy_read_from_default_home |
 | A7b | core enforces (simulated) | DORMANT, logged once | test_A7b_dormant_when_core_enforces |
 | A8 | enabled: false | full bypass incl. drifted legacy | test_A8_explicit_disable_is_full_bypass |
-| A8b | key absent | ENABLED | test_A8b_key_absent_means_enabled |
-| A8c | route_from_default: false | no deny, no route | test_A8c_route_from_default_false_stays_on_default |
+| A8b | key absent | Core-gen-conditional: pre-#87101 → ENABLED; ≥#87101 → DISABLED (core defaults) | test_A8b_key_absent_means_enabled |
+| A8c | route_from_default: false | DENY + refusal | test_A8c_route_from_default_false_denies |
 | A8d | require_owner_metadata: false | unowned create allowed | test_A8d_optional_metadata_allows_unowned_create |
 | A8e | default + create, owner=default | plain create | test_A8e_owner_default_is_not_a_route |
 | A9 | decision latency | p95 <50ms N≥1000, zero-I/O early-bail | test_A9_latency_p95_and_zero_io_early_bail |
@@ -261,8 +261,9 @@ Commands + results (venv Python 3.11.15, Linux 7.1.3-arch2-2):
 - **L1**: `tests/qa/conftest.py` hardcodes `CORE` to the live checkout — the
   fingerprint self-test printed `CORE=809e94ca4c` during a provably pinned
   run. Derive `CORE` from `SORE_CORE_ROOT` when set.
-- **L2**: `test_A8c_route_from_default_false_stays_on_default` name predates
-  the F2 amendment (behavior is now DENY); rename at convenience.
+- **L2** (DONE): `test_A8c_route_from_default_false_stays_on_default` renamed
+  to `test_A8c_route_from_default_false_denies` (behavior is DENY per F2
+  amendment).
 
 **VERDICT: PASS (QA-L2)** — BUILD-4 Gate A/B accepted vs pinned core
 `057dcdf236`; F1/F2/F3 fixed; F5 ruled (not a candidate defect). Gate C/D

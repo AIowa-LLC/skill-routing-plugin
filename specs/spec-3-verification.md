@@ -28,7 +28,7 @@ each gate must produce. QA owns verdicts (PASS/HOLD/BLOCKED), not repairs.
 | A7 | policy read from DEFAULT config | specialist weakening own config does NOT weaken rule |
 | A7b | core enforces (simulated) | plugin create-gate DORMANT (audit-only, no deny; dormancy logged once, not per-call) |
 | A8 | `enabled: false` explicit | full bypass incl. drifted legacy skills |
-| A8b | key absent + plugin installed | ENABLED (default-ON posture) |
+| A8b | key absent + plugin installed | Core-generation-conditional: pre-#87101 core → ENABLED (plugin default-ON posture); ≥#87101 core → DISABLED (core defaults merged via `load_config`; plugin default-ON structurally unreachable — fleets opt in via explicit `enabled:true`) |
 | A8c | `route_from_default: false` + default create, owner=trt | DENY + "configured to refuse cross-profile creation; delegate the create." (amended 2026-08-24 t_4f4ff38c: matches upstream e12d79edd1 refusal semantics — explicit refuse denies the create entirely; nothing lands locally and nothing routes) |
 | A8d | `require_owner_metadata: false` + create w/o owner | allowed; unowned skill created (surfaces as V1 `unowned` row state) |
 | A8e | default + create, owner=default | plain create under default (owner==default is not a route) |
@@ -86,13 +86,14 @@ console error fails the row.
   Compare sorted, excluding run_id and discovered_at timestamps.
 - D4: Uninstall cleanliness: remove folder → no orphan state (ctx.storage
   namespaced, ledger entries self-contained).
-- D4b: Install on fresh profile: absent config key → default-ON works day one.
+- D4b: Install on fresh profile: absent config key → default-ON works day one on pre-#87101 cores; ≥#87101 cores ship `enabled: False` in their defaults → fleets opt in via explicit `enabled:true`.
 - D4c: After uninstall, leftover `skills.owner_routing` config key is inert —
   no hooks registered, creates behave vanilla.
 - D5: Core upgrade path: simulate core merge of #87101 → plugin detects, goes
-  dormant on create-gate, keeps watchdog+UI. No double-deny. Provenance probe:
-  while core enforces, a create attempt yields exactly ONE denial and it
-  originates from core (message provenance check), plugin audit-logs only.
+  dormant on create-gate, keeps watchdog+UI. No double-deny. Provenance
+  probe: while core enforces under `route_from_default:true`, a create
+  attempt yields at most ONE enforcement action originating from core
+  (routed create OR denial); plugin gate returns None and audit-logs only.
 - D5b: Simulated partial core (policy exists, routing absent) → fail-safe
   decision documented and tested.
 - D5c: Core enforcement removed after dormancy → plugin gate REACTIVATES on

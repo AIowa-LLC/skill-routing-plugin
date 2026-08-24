@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-CORE = Path("/home/tony/.hermes/hermes-agent")
+CORE = Path(os.environ.get("SORE_CORE_ROOT", "/home/tony/.hermes/hermes-agent"))
 
 
 @pytest.fixture()

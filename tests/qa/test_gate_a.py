@@ -330,6 +330,10 @@ def test_A8_explicit_disable_is_full_bypass(gate, fleet):
 
 # ---------------------------------------------------------------------------
 # A8b — key absent + plugin installed → ENABLED (default-ON posture)
+# CERTIFIES pre-#87101 core only: on cores ≥#87101, core ships
+# `enabled: False` in defaults (merged via load_config), so the plugin's
+# absent-key=ENABLED posture is structurally unreachable — run pinned to a
+# pre-#87101 core (SORE_CORE_ROOT) to certify this row.
 # ---------------------------------------------------------------------------
 
 
@@ -349,7 +353,7 @@ def test_A8b_key_absent_means_enabled(gate, fleet):
 # ---------------------------------------------------------------------------
 
 
-def test_A8c_route_from_default_false_stays_on_default(gate, fleet):
+def test_A8c_route_from_default_false_denies(gate, fleet):
     # SPEC-3 A8c (amended 2026-08-24, t_4f4ff38c): refusal posture matches
     # upstream e12d79edd1 — explicit refuse → DENY, delegate message, and
     # nothing lands anywhere (no local create, no route).

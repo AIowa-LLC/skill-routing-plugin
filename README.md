@@ -2,11 +2,18 @@
 
 MIT licensed — see LICENSE.
 
-## Divergence from core PR #87101 (intentional)
+## Divergence from core PR #87101 (intentional, core-generation-bound)
 
-Plugin treats `skills.owner_routing` key **absent = ENABLED** (installing the
-plugin is the opt-in); core PR #87101 treats absent = disabled. Both honor an
-explicit `enabled` value identically.
+Plugin treats `skills.owner_routing` key **absent = ENABLED** on pre-#87101
+cores (installing the plugin is the opt-in); core PR #87101 treats absent =
+disabled. Both honor an explicit `enabled` value identically.
+
+**Core-generation boundary:** on cores ≥ #87101, core ships
+`skills.owner_routing.enabled: False` in its defaults, merged through
+`load_config`. The plugin's absent-key=ENABLED posture is structurally
+unreachable on those cores — fleets opt in via explicit
+`skills.owner_routing.enabled: true`. The plugin's own default-ON only
+governs pre-#87101 cores where the key is genuinely absent from config.
 
 ## Layout
 
