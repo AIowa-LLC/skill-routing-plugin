@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .common import fleet_default_home, new_finding_id, utc_now_iso
 from .frontmatter import declared_skill_owner
-from .hoarding import lint_global_skill
+from .hoarding import lint_global_skill, global_justification
 from . import ledger as ledger_mod
 
 logger = logging.getLogger(__name__)
@@ -200,18 +200,20 @@ def _analyze(
                 )
             )
         if scope == "default" and owner is not None:
-            findings.append(
-                _finding(
-                    "misplaced-global",
-                    "medium",
-                    skill,
-                    owner,
-                    "default",
-                    f"Global skill {skill!r} carries owner_profile={owner!r}. "
-                    "Either strip the owner metadata (with a global "
-                    "justification) or move the skill into the owner profile.",
+            justified = global_justification(entry["frontmatter"], entry["body"])
+            if justified is None:
+                findings.append(
+                    _finding(
+                        "misplaced-global",
+                        "medium",
+                        skill,
+                        owner,
+                        "default",
+                        f"Global skill {skill!r} carries owner_profile={owner!r}. "
+                        "Either strip the owner metadata (with a global "
+                        "justification) or move the skill into the owner profile.",
+                    )
                 )
-            )
         if scope == "default" and owner is None:
             hoarding = lint_global_skill(
                 skill, entry["frontmatter"], entry["body"]
