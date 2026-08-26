@@ -125,6 +125,8 @@ def _skills_in(home: Path) -> List[Tuple[str, Path]]:
             break
         if not child.is_dir() or child.name.startswith("."):
             continue
+        if child.is_symlink() and not _resolves_within(child, home):
+            continue  # alias to another home's skill — counted there, not here
         skill_md = child / "SKILL.md"
         if skill_md.is_file():
             found.append((child.name, skill_md))
@@ -137,10 +139,19 @@ def _skills_in(home: Path) -> List[Tuple[str, Path]]:
             if len(found) >= _MAX_SKILLS_PER_HOME:
                 break
             if grandchild.is_dir():
+                if grandchild.is_symlink() and not _resolves_within(grandchild, home):
+                    continue  # alias to another home's skill
                 nested = grandchild / "SKILL.md"
                 if nested.is_file():
                     found.append((grandchild.name, nested))
     return found
+
+
+def _resolves_within(path: Path, root: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
 
 
 def _read(skill_md: Path) -> Tuple[Dict[str, Any], str]:
