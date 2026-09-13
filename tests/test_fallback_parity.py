@@ -34,6 +34,12 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "dashboard"))
 
 import plugin_api  # noqa: E402
+from conftest import TEST_SESSION_HEADER, TEST_SESSION_TOKEN  # noqa: E402
+
+# Security contract (D1) made session-token auth mandatory on every REST
+# template — fail-closed when a token is configured. These fallback tests
+# predate that lane; their clients authenticate like test_dashboard_api.
+AUTH_HEADERS = {TEST_SESSION_HEADER: TEST_SESSION_TOKEN}
 
 API = "/api/plugins/skill-owner-routing"
 
@@ -116,7 +122,7 @@ def no_engine(monkeypatch):
 def fallback_client(drift_fleet, no_engine):
     app = FastAPI()
     app.include_router(plugin_api.router, prefix=API)
-    with TestClient(app) as tc:
+    with TestClient(app, headers=AUTH_HEADERS) as tc:
         yield tc
 
 
@@ -188,7 +194,7 @@ class TestFallbackFeedPopulated:
         monkeypatch.setattr(plugin_api, "_default_home", lambda: home)
         app = FastAPI()
         app.include_router(plugin_api.router, prefix=API)
-        with TestClient(app) as client:
+        with TestClient(app, headers=AUTH_HEADERS) as client:
             drift = client.get(f"{API}/drift").json()
             summary = client.get(f"{API}/drift/summary").json()
         assert drift["findings"] == []
@@ -297,7 +303,7 @@ class TestPrefixStateBackfill:
         monkeypatch.setattr(plugin_api, "_default_home", lambda: drift_fleet)
         app = FastAPI()
         app.include_router(plugin_api.router, prefix=API)
-        with TestClient(app) as client:
+        with TestClient(app, headers=AUTH_HEADERS) as client:
             drift = client.get(f"{API}/drift").json()
         assert drift["findings"], "pre-fix state must be backfilled with findings (M7)"
         assert drift["meta"]["open_count"] > 0
