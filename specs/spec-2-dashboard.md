@@ -51,7 +51,10 @@ render directly).
 Enabled switch + `require_owner_metadata` + `route_from_default` switches.
 Writes via plugin REST → core config `skills.owner_routing` (DEFAULT profile
 config). Shows effective posture: "Default-ON (plugin installed) / User-disabled /
-Core-managed (dormant)" with StatusDot + one-line explanation.
+Core-managed (dormant)" with StatusDot + one-line explanation. "Core-managed
+(dormant)" is reachable only on a core that carries PR #87101 enforcement —
+current core does not (see README "Coexistence + dormancy"); on current core
+the panel always resolves to one of the first two states.
 
 ### V4 — Statusbar chip (area: 'statusBar.right')
 `[icon] N` where N = open drift findings; StatusDot colored by worst severity;

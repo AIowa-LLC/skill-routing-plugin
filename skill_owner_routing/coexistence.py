@@ -8,6 +8,12 @@ policy enabled from DEFAULT-home config ⇒ plugin CREATE gate goes DORMANT
 (log once, audit-only). Dormancy is scoped to the create gate ONLY — edit/
 patch/delete/write_file/remove_file/archive gating NEVER dorms, because
 PR #87101 gates create exclusively. Never double-deny.
+
+HISTORICAL (Tony ruling 2026-09-12): current core carries no owner-routing
+symbols at all, so this probe always returns False there and the plugin is
+FULLY ACTIVE BY DESIGN — the accepted posture on a single-user fleet (the
+gate is the product). The probe remains for any future core that
+reintroduces PR #87101 enforcement.
 """
 
 from __future__ import annotations
