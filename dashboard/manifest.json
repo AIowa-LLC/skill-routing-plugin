@@ -3,6 +3,6 @@
   "label": "Skill Ownership",
   "description": "Fleet skill ownership map, drift watchdog feed, and owner-routing policy panel. Backend for the skill-owner-routing plugin (requires the engine half for full enforcement; runs scan-fallback without it).",
   "icon": "organization",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "api": "plugin_api.py"
 }

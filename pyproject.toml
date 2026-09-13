@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skill-owner-routing"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fleet skill ownership enforcement: creation routing, sideways-write denial, ownership drift watchdog, No-Specialist-Hoarding lint."
 readme = "README.md"
 requires-python = ">=3.11"
