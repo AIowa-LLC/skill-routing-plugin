@@ -87,6 +87,8 @@ _JUSTIFICATIONS = {"control-plane", "shared-primitive", "verified-structural-dep
 _CORE_PROBE_TTL = 5.0
 _RUN_HISTORY_CAP = 50
 _EVENT_HISTORY_CAP = 200
+_MAX_PROFILES = 64          # engine drift._MAX_PROFILES parity (bounded fleet)
+_MAX_SKILLS_PER_HOME = 2000  # engine drift._MAX_SKILLS_PER_HOME parity
 
 _STATE_LOCK = threading.RLock()
 _SOCKS_LOCK = threading.Lock()
@@ -428,16 +430,156 @@ def _posture(policy: Dict[str, Any], core_enforces: bool) -> str:
 # ---------------------------------------------------------------------------
 
 def _enumerate(home: Path) -> Dict[str, Any]:
-    """All skill copies: name → [{scope(global|profile), profile, path, owner, fm}]."""
-    profiles = sorted(
-        p.name
-        for p in (home / "profiles").glob("*")
-        if p.is_dir() and _PROFILE_ID_RE.match(p.name)
-    )
+    """All skill copies: name → [{scope(global|profile), profile, path, owner, fm}].
+
+    Engine-authoritative: when the engine is importable, the inventory IS the
+    engine's own discovery output (drift._all_homes + drift._skills_in — the
+    same functions the scanner uses), so /map can never disagree with the
+    engine about what exists. Otherwise the local port mirrors those
+    semantics (see _enumerate_local).
+    """
+    engine = _load_engine()
+    if engine is not None:
+        derived = _engine_inventory(engine, home)
+        if derived is not None:
+            return derived
+    return _enumerate_local(home)
+
+
+def _engine_inventory(engine: Dict[str, Any], home: Path) -> Optional[Dict[str, Any]]:
+    """Fleet inventory derived from the engine's discovery (single truth).
+
+    Runs the engine's own home selection (profiles whose skills dir resolves
+    onto the global skills dir are the same store and are skipped) and skill
+    discovery (top-level + category-nested, cross-home aliases skipped).
+    Returns None when the engine's discovery interface is unavailable so the
+    caller can fall back to the local port.
+    """
+    drift_mod = engine.get("drift")
+    skills_in = getattr(drift_mod, "_skills_in", None)
+    homes_raw = _engine_call(engine, "_all_homes", home, submodule="drift")
+    if not isinstance(homes_raw, list) or not callable(skills_in):
+        return None
+    profiles: List[str] = []
+    copies: Dict[str, List[Dict[str, Any]]] = {}
+    seen_global = False
+    for item in homes_raw:
+        try:
+            scope, scope_home = item
+        except (TypeError, ValueError):
+            continue
+        if scope == "default" and not seen_global:
+            v1_scope, profile = "global", None  # scope "default" → V1 "global"
+            seen_global = True
+        elif _PROFILE_ID_RE.match(str(scope)):
+            v1_scope, profile = "profile", str(scope)
+            profiles.append(profile)
+        else:
+            continue  # dot-profiles etc. are not V1 profiles (no rows, no chips)
+        try:
+            found: List[Any] = list(skills_in(Path(scope_home)))  # type: ignore[arg-type]
+        except Exception:
+            return None
+        for name, skill_md in found:
+            skill_md = Path(skill_md)
+            try:
+                fm = _parse_frontmatter(skill_md.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            copies.setdefault(str(name), []).append(
+                {
+                    "scope": v1_scope,
+                    "profile": profile,
+                    "path": str(skill_md.parent),
+                    "owner": _owner_of(fm),
+                    "fm": fm,
+                }
+            )
+    return {"profiles": sorted(profiles), "copies": copies}
+
+
+def _resolves_within(path: Path, root: Path) -> bool:
+    """Port of engine drift._resolves_within (alias detection)."""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
+def _skills_in_scope(skills_dir: Path, scope_root: Path) -> List[Path]:
+    """SKILL.md paths at one or two levels — port of engine drift._skills_in.
+
+    Category-nested skills (skills/<category>/<name>/SKILL.md) are visible;
+    skill dirs that are symlinks resolving outside the scanned home are
+    aliases counted in their real home, not here.
+    """
+    found: List[Path] = []
+    try:
+        children = sorted(skills_dir.iterdir())
+    except OSError:
+        return found
+    for child in children:
+        if len(found) >= _MAX_SKILLS_PER_HOME:
+            break
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        if child.is_symlink() and not _resolves_within(child, scope_root):
+            continue  # alias to another home's skill — counted there, not here
+        skill_md = child / "SKILL.md"
+        if skill_md.is_file():
+            found.append(skill_md)
+            continue
+        try:
+            grandchildren = sorted(child.iterdir())
+        except OSError:
+            continue
+        for grandchild in grandchildren:
+            if len(found) >= _MAX_SKILLS_PER_HOME:
+                break
+            if not grandchild.is_dir():
+                continue
+            if grandchild.is_symlink() and not _resolves_within(grandchild, scope_root):
+                continue  # alias to another home's skill
+            nested = grandchild / "SKILL.md"
+            if nested.is_file():
+                found.append(nested)
+    return found
+
+
+def _enumerate_local(home: Path) -> Dict[str, Any]:
+    """Fallback enumeration — port of the engine's discovery semantics.
+
+    Profiles whose ``skills`` directory resolves INTO the global skills
+    directory are skipped: the default profile conventionally symlinks
+    ``profiles/default/skills -> ../../skills`` (global skills ARE default's
+    skills). Enumerating both would render every global skill twice (once as
+    a phantom profile:: row) and mint duplicate/hoarding findings for a
+    single physical file.
+    """
+    try:
+        global_skills_real = (home / "skills").resolve()
+    except OSError:
+        global_skills_real = None
+    profiles: List[str] = []
+    try:
+        children = sorted((home / "profiles").iterdir())
+    except OSError:
+        children = []
+    for child in children[:_MAX_PROFILES]:
+        if not child.is_dir() or not _PROFILE_ID_RE.match(child.name):
+            continue
+        if global_skills_real is not None:
+            try:
+                child_skills_real = (child / "skills").resolve()
+            except OSError:
+                child_skills_real = None
+            if child_skills_real == global_skills_real:
+                continue  # symlinked onto the global skills dir — same store
+        profiles.append(child.name)
     copies: Dict[str, List[Dict[str, Any]]] = {}
     for scope, profile in [("global", None)] + [("profile", p) for p in profiles]:
         skills_dir = home / "skills" if scope == "global" else home / "profiles" / (profile or "") / "skills"
-        for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
+        for skill_md in _skills_in_scope(skills_dir, skills_dir.parent):
             try:
                 fm = _parse_frontmatter(skill_md.read_text(encoding="utf-8", errors="replace"))
             except OSError:
