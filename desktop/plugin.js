@@ -268,6 +268,11 @@ function pollRun(runId, deadline) {
         if (state && state.state === 'running' && Date.now() < deadline) {
           return new Promise(resolve => setTimeout(resolve, AUDIT_POLL_MS)).then(tick)
         }
+        if (state && state.state === 'running') {
+          // deadline expired while the run is still 'running': report the
+          // timeout explicitly — never let it fall through as success
+          return { state: 'timeout' }
+        }
         return state
       },
       () => {
@@ -281,6 +286,16 @@ function pollRun(runId, deadline) {
   return tick()
 }
 
+// Terminal audit-run states are 'done' and 'failed'. A run still 'running'
+// at the poll deadline surfaces as 'timeout' (pollRun) — and ANY non-done
+// final state (missing final, 'running', 'timeout', 'failed') must report
+// failure. Only 'done' is success.
+function auditOutcome(final) {
+  const failed = !final || final.state !== 'done'
+  const count = final && final.findings_count != null ? final.findings_count : '?'
+  return { failed, count }
+}
+
 function runAuditFlow() {
   return apiRest('/audit/run', { method: 'POST', body: {} }).then(res => {
     const runId = res && res.run_id
@@ -289,8 +304,7 @@ function runAuditFlow() {
     return pollRun(runId, Date.now() + AUDIT_TIMEOUT_MS)
   }).then(final => {
     invalidateAll()
-    const failed = !final || final.state === 'failed'
-    const count = final && final.findings_count != null ? final.findings_count : '?'
+    const { failed, count } = auditOutcome(final)
     host.notify({
       kind: failed ? 'error' : 'success',
       message: (failed ? tStatic('audit.failed') : tStatic('audit.done')) + ' — ' + count + ' ' + tStatic('audit.findings')
@@ -987,12 +1001,14 @@ const plugin = {
 }
 
 export {
+  auditOutcome,
   matchesFilter,
   matchesSearch,
   nestMessages,
   normalizeRow,
   plugin as default,
   plugin,
+  pollRun,
   postureOf,
   postureTone,
   runAuditFlow,

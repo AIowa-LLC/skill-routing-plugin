@@ -217,5 +217,38 @@ const chip = chips[0].render()
 const chipTypes = types(chip)
 check(chipTypes.has('StatusDot') && chipTypes.has('Codicon'), 'statusbar chip renders StatusDot + Codicon')
 
+console.log('\n== M8: audit outcome decision (timeout never reports success) ==')
+check(m.auditOutcome({ state: 'done', findings_count: 3 }).failed === false, "auditOutcome: state 'done' is success")
+check(m.auditOutcome({ state: 'done', findings_count: 3 }).count === 3, 'auditOutcome: done carries findings_count')
+check(m.auditOutcome(null).failed === true, 'auditOutcome: missing final is failure')
+check(m.auditOutcome({ state: 'failed' }).failed === true, "auditOutcome: 'failed' is failure")
+check(m.auditOutcome({ state: 'running', findings_count: 2 }).failed === true, "auditOutcome: still 'running' at deadline is FAILURE, never success")
+check(m.auditOutcome({ state: 'timeout' }).failed === true, "auditOutcome: 'timeout' is failure")
+check(m.auditOutcome({ state: 'running' }).count === '?', "auditOutcome: count falls back to '?'")
+
+// pollRun behavioral pins against a controllable rest stub (deadline already
+// expired): a run still 'running' must surface 'timeout', a dead endpoint
+// 'failed', and a terminal 'done' must pass through unchanged.
+{
+  let restBehavior = () => Promise.resolve({ state: 'running' })
+  m.plugin.register({
+    rest: (path, opts) => restBehavior(path, opts),
+    storage: { get: (_k, fb) => fb, set() {}, remove() {} },
+    i18n: { register() {}, t: k => k },
+    registerMany() {},
+    onDispose() {},
+    socket: () => () => {}
+  })
+  const past = Date.now() - 1000
+  const firstPath = await m.pollRun('run1', past)
+  check(firstPath.state === 'timeout', "pollRun: still 'running' at deadline returns 'timeout', not success", JSON.stringify(firstPath))
+  restBehavior = () => Promise.reject(new Error('endpoint down'))
+  const dead = await m.pollRun('run2', past)
+  check(dead.state === 'failed', "pollRun: unreachable endpoint at deadline returns 'failed'", JSON.stringify(dead))
+  restBehavior = () => Promise.resolve({ state: 'done', findings_count: 7 })
+  const done = await m.pollRun('run3', past)
+  check(done.state === 'done' && done.findings_count === 7, 'pollRun: terminal done passes through', JSON.stringify(done))
+}
+
 console.log('\n' + (failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)'))
 process.exit(failures === 0 ? 0 : 1)

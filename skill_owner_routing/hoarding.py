@@ -44,7 +44,7 @@ def global_justification(frontmatter: Dict[str, Any], body: str) -> Optional[str
 
 
 def lint_global_skill(
-    skill: str, frontmatter: Dict[str, Any], body: str
+    skill: str, frontmatter: Dict[str, Any], body: str, path: str = ""
 ) -> Optional[Dict[str, Any]]:
     """Return an `unowned`/hoarding finding dict for an unjustified global
     skill, or None when the skill carries a valid justification."""
@@ -54,7 +54,7 @@ def lint_global_skill(
     if justification is not None:
         return None
     return {
-        "id": new_finding_id("unowned", skill, "default"),
+        "id": new_finding_id("unowned", skill, "default", path),
         "kind": "unowned",
         "severity": "low",
         "skill": skill,
