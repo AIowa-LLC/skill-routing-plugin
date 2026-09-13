@@ -105,6 +105,16 @@ PR #87101 gates create exclusively (verified: edit/patch/delete/write_file/
 remove_file dispatch unchanged), so sideways-mutation gating remains
 plugin-owned regardless of core merge state. Never double-deny.
 
+AMENDMENT (2026-09-13, card t_5c92790e): the dormancy clause above is
+conditional on core support that no longer exists. PR #87101 was briefly
+merged (observed at core `809e94ca4c`, 2026-08-24) and has since been
+removed — current core (v0.21.2 @ `3e09e5a15f`, verified 2026-09-13)
+carries neither the probe symbol nor `skills.owner_routing` defaults.
+On any symbol-absent core the create gate is ACTIVE BY DESIGN: fully
+active on (re)install is the accepted posture (Tony ruling 2026-09-12 —
+single-user fleet, the gate is the product). Dormancy remains implemented
+and correct for any future core that reintroduces enforcement.
+
 ## Watchdog scheduling (reviewed)
 Hermes cron on the DEFAULT profile, `no_agent: true` script mode — the
 scheduler runs the drift scan entrypoint directly (zero LLM cost, empty
