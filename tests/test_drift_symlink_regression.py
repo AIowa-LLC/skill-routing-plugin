@@ -57,9 +57,6 @@ def test_default_profile_symlinked_skills_dir_is_not_a_second_home(tmp_path, mon
     assert scopes == ["default", "ops"], f"symlinked default must be skipped, got {scopes}"
 
     result = drift.scan()
-    skills_seen = set()
-    for entry_catalog in [c["skill"] for c in []]:
-        pass
     # collect scanned names via findings-free path: rescan catalog
     names = set()
     for scope, home in homes:
