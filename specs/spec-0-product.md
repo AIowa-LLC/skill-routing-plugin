@@ -1,5 +1,5 @@
 # SPEC-0 — Product Contract & Fleet Integration
-Owner profile: `default` (Orchestrator) | Status: v1.0 (crew-reviewed, amendments merged 2026-08-24) | Spec-only
+Owner profile: `default` (Orchestrator) | Status: v1.1 (crew-reviewed 2026-08-24; reconciled to shipped behavior 2026-09-13)
 
 ## Objective
 Bind the specs together: product contract, fleet integration rules, sequencing,
@@ -39,6 +39,12 @@ and the human gates. This is the integrating document the crew works from.
    SPEC-1 drift finding records, SPEC-2 Drift Feed rows/resolve payloads, and
    SPEC-3 Gate B evidence all serialize THIS schema; no spec defines a
    divergent shape.
+   Severity vocabulary (as shipped): the ENGINE natively emits
+   low/medium/high (ledger + tool surfaces); the DASHBOARD REST layer
+   normalizes to info/warning/critical at its boundary
+   (low→info, medium→warning, high→critical) because the UI's severity
+   chips are keyed to that vocabulary. Both vocabularies are stable and
+   the mapping is total.
 4. **Dormancy**: core-coexistence behavior is a SPEC-1 mechanism with SPEC-2
    surface (posture display) and SPEC-3 Gate A7b/D5 coverage.
 
@@ -64,8 +70,11 @@ and the human gates. This is the integrating document the crew works from.
 - Fleet-wide policy read: plugin on the GEEKOM (fleet commander) reads DEFAULT
   config; TONY-GAMING-TOP is a compute peer — plugin data there stays local
   (no cross-host authority changes; A2A stays transport).
-- Watchdog scheduling: plugin-local timer (no new recurring cron without
-  orchestrator review — see Cron Ownership rules).
+- Watchdog execution: on demand only (skill_owner_audit tool, dashboard
+  audit endpoints, cold-start seed scans) — the kit schedules nothing;
+  plugin-side timers were rejected in design and scheduled scanning is
+  roadmap (no new recurring cron without orchestrator review — see Cron
+  Ownership rules).
 - No raw secrets in findings, logs, or dashboard payloads.
 
 ## Acceptance for this spec
@@ -75,4 +84,4 @@ reviews the v1.0 set (or amendments land first) → clears build gate.
 ## References
 - Discovery card: kanban board `skill-routing-plugin`, card t_611b1103
 - Ground-truth commit: e12d79edd1; PR #87101; corollary PR #87138
-- Workspace: /home/tony/projects/skill-routing-plugin/specs/
+- Workspace: ~/projects/skill-routing-plugin/specs/

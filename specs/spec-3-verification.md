@@ -1,5 +1,5 @@
 # SPEC-3 — Verification & Release-Gate Design
-Owner profile: `qa` | Status: v1.0 (crew-reviewed, amendments merged 2026-08-24) | Spec-only — no build authorized yet
+Owner profile: `qa` | Status: v1.1 (crew-reviewed 2026-08-24; reconciled to shipped behavior 2026-09-13)
 
 ## Objective
 Define the independent acceptance design for the `skill-owner-routing` plugin:
@@ -41,6 +41,13 @@ Message-contract assertions pin stable upstream substrings, not full strings:
 "refuse cross-profile creation" (A8c refusal deny).
 
 ## Gate B — Drift watchdog (rebuilt, no upstream basis)
+
+Severity vocabulary note (SPEC-0 Interface 3 as amended): engine surfaces
+(ledger, skill_owner_audit tool) emit native low/medium/high; the dashboard
+REST layer normalizes to info/warning/critical (total mapping). Gate B
+evidence records the native vocabulary; dashboard-contract evidence
+records the normalized one.
+
 | # | Scenario | Expected |
 |---|---|---|
 | B1 | skill in wrong profile vs owner_profile | finding: drifted |
@@ -52,7 +59,7 @@ Message-contract assertions pin stable upstream substrings, not full strings:
 | B3 | scan on N=500 skills (generated fixture fleet) | completes <10s, no partial state |
 | B3b | concurrent scan + create | no race, no lost findings |
 | B4 | propose-fix path | proposes, never auto-mutates (approval-gated) |
-| B4b | audit run via REST/CLI | 202 + run_id; result lands in feed; idempotent re-run |
+| B4b | audit run via REST (dashboard) or the `skill_owner_audit` tool | REST: 202 + run_id; tool: JSON result with counts; both land findings in the ledger/feed; idempotent re-run |
 
 ## Gate C — Dashboard acceptance (rendered evidence, not code review)
 - C1: Ownership Map renders rows from /map with all row states visible
@@ -130,6 +137,6 @@ release-gate scope (should D be L3 given public kit release?). Output: SPEC-3
 v1.0 + amendments, NOT test code.
 
 ## References
-- Workspace: /home/tony/projects/skill-routing-plugin/specs/
+- Workspace: ~/projects/skill-routing-plugin/specs/
 - PR test matrix base: local commit e12d79edd1 tests (+318 lines)
 - Fleet QA standard: SOUL routing table (QA owns evidence-backed verdicts)

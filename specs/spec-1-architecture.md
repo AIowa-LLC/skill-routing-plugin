@@ -1,5 +1,5 @@
 # SPEC-1 — Plugin Architecture & Enforcement Engine
-Owner profile: `developer` | Status: v1.0 (crew-reviewed, amendments merged 2026-08-24) | Spec-only — no build authorized yet
+Owner profile: `developer` | Status: v1.1 (crew-reviewed 2026-08-24; reconciled to shipped behavior 2026-09-13)
 
 ## Objective
 Define the architecture for `skill-owner-routing`, a standalone Hermes plugin that
@@ -29,20 +29,38 @@ drift-watchdog, and the No-Specialist-Hoarding discipline — without modifying 
 ~/.hermes/plugins/skill-owner-routing/
 ├── plugin.yaml            # kind: standalone; provides_hooks: [pre_tool_call];
 │                          #   provides_tools: [skill_owner_create, skill_owner_audit]
-├── skill_owner_routing/   # python package
+├── __init__.py            # sys.path bootstrap: Hermes loads directory plugins as
+│                          #   hermes_plugins.<slug> without adding the dir to
+│                          #   sys.path; wrapper adds it so the engine imports
+│                          #   as top-level (hardproof precedent pattern)
+├── skill_owner_routing/   # python package (the engine)
+│   ├── common.py          #   DEFAULT-home resolution, UTC stamps, finding ids
 │   ├── policy.py          #   policy read (DEFAULT profile config — fleet rule)
 │   ├── frontmatter.py     #   owner_profile parse/validate
-│   ├── gate.py            #   pre_tool_call decision engine (early-bail for non-skill_manage)
+│   ├── gate.py            #   pre_tool_call decision engine (early-bail for
+│   │                      #   non-skill_manage)
 │   ├── routed_create.py   #   ported routed-create transaction (from e12d79edd1)
+│   ├── index.py           #   name→home index for mutation-target resolution
 │   ├── drift.py           #   REBUILT watchdog: ownership drift scan — emits
-│                          #   findings in the canonical record shape defined
-│                          #   in SPEC-0 Interface 3 ({id, kind, severity,
-│                          #   skill, expected_owner, actual, proposed_fix,
-│                          #   discovered_at, status}; kind per that enum).
+│   │                      #   findings in the canonical record shape defined
+│   │                      #   in SPEC-0 Interface 3 ({id, kind, severity,
+│   │                      #   skill, expected_owner, actual, proposed_fix,
+│   │                      #   discovered_at, status}; kind per that enum);
+│   │                      #   includes the watchdog_main() console entrypoint
 │   ├── hoarding.py        #   No-Specialist-Hoarding policy lint
-├── dashboard/plugin_api.py  # FastAPI router (see SPEC-2 contract)
-├── desktop/plugin.js        # UI half (SPEC-2)
-└── tests/                   # unit + E2E w/ temp HERMES_HOME (SPEC-3)
+│   ├── ledger.py          #   findings ledger in DEFAULT home — atomic writes,
+│   │                      #   deterministic ids, status-preserving upserts
+│   ├── coexistence.py     #   core feature-detect dormancy probe
+│   ├── register.py        #   registration: ONE pre_tool_call hook, TWO tools
+│   └── schemas.py         #   skill_owner_create / skill_owner_audit schemas
+├── dashboard/             # FastAPI backend: manifest.json, plugin_api.py
+│                          #   (SPEC-2 REST contract), home_override.py
+├── desktop/plugin.js      # UI half (SPEC-2)
+├── tests/                 # unit + E2E w/ temp HERMES_HOME (SPEC-3)
+├── qa/                    # gate matrix + runner (SPEC-3 evidence)
+├── specs/                 # this spec set
+├── README.md, LICENSE     # docs + MIT license
+└── pytest.ini             # test config (gate_a / gate_b markers)
 ```
 
 ## Enforcement surface (Tony ruling: FULL coverage)
@@ -79,7 +97,8 @@ drift-watchdog, and the No-Specialist-Hoarding discipline — without modifying 
 3. **drift watchdog** (REBUILT — no upstream basis):
    - scan all profiles + global: owner_profile vs actual location; unknown owner
      IDs; path/metadata drift; global+profile duplicates (hoarding signal).
-   - scheduled + on-demand (`skill_owner_audit`); findings to ledger + dashboard;
+   - on-demand (`skill_owner_audit` tool + dashboard audit endpoints); findings
+     to ledger + dashboard;
      PROPOSES fixes, never auto-mutates (approval-gated per fleet rules).
 4. **hoarding lint** (Tony ruling: plugin owns the discipline):
    - global-scope skills must justify: control-plane / shared-primitive /
@@ -115,24 +134,35 @@ active on (re)install is the accepted posture (Tony ruling 2026-09-12 —
 single-user fleet, the gate is the product). Dormancy remains implemented
 and correct for any future core that reintroduces enforcement.
 
-## Watchdog scheduling (reviewed)
-Hermes cron on the DEFAULT profile, `no_agent: true` script mode — the
-scheduler runs the drift scan entrypoint directly (zero LLM cost, empty
-stdout = silent, non-empty = findings digest delivered; classic watchdog
-pattern). Plugin-side timers rejected: `register()` runs per agent session →
-thread dies with session, duplicates across concurrent sessions, no
-persistence; hardproof ships no background timer and there is no
-plugin-background-task facility. Kit installer registers the job in the
-default-profile cron registry; plugin README documents `hermes cron` removal.
-Cadence: daily 04:00 + on-demand via `skill_owner_audit`. Findings → plugin
-ledger file in DEFAULT home (fleet-level surface) + dashboard (SPEC-2).
-Note: gateway ticker only ticks default unless `gateway.multiplex_profiles:
-true` (verified constraint).
+## Watchdog execution (as shipped)
+Scans run ON DEMAND — nothing schedules them. Three shipped triggers: the
+`skill_owner_audit` tool, the dashboard audit endpoints (SPEC-2), and the
+cold-start seed scans the dashboard performs when no ledger/state exists yet.
+Findings → plugin ledger file in DEFAULT home (fleet-level surface) +
+dashboard (SPEC-2). `drift.watchdog_main()` ships as a console entrypoint
+(exit 0 + empty stdout when clean; JSON digest on stdout when findings
+exist) so an operator CAN wire it into Hermes cron manually (`no_agent:
+true` script mode, zero LLM cost) — but the kit registers no cron job and
+ships no installer. Plugin-side timers were rejected in design: `register()`
+runs per agent session → thread dies with session, duplicates across
+concurrent sessions, no persistence; there is no plugin-background-task
+facility. Scheduled scanning (cron registration + installer) is roadmap,
+not shipped behavior.
 
 ## Non-negotiables
 No core file edits. Profile-safe paths (`get_hermes_home`). Atomic writes.
 No secrets in code/logs. Decision path <50ms with early bail on non-skill_manage
 calls (no I/O). All handlers return JSON strings. MIT + license headers.
+
+## Roadmap / not yet implemented
+Collected here so the sections above describe only what the kit ships:
+- **Watchdog cron registration + kit installer** — a scheduled drift scan
+  (proposed cadence: daily 04:00) registered in the DEFAULT-profile cron
+  registry by an install script, with README-documented `hermes cron`
+  removal. Nothing is implemented: no cron-registration code, no installer.
+  Operators wanting scheduled scans today wire `drift.watchdog_main()` into
+  cron manually (caveat: the gateway ticker only ticks default unless
+  `gateway.multiplex_profiles: true`).
 
 ## Acceptance for this spec
 Developer reviews feasibility of: deny-redirect vs. any cleaner routed-create
@@ -140,7 +170,7 @@ path; the core-detection probe; watchdog scheduling (plugin-side timer vs cron).
 Output: finalized SPEC-1 v1.0 + any amendments, NOT code.
 
 ## References
-- Workspace: /home/tony/projects/skill-routing-plugin/
+- Workspace: ~/projects/skill-routing-plugin/
 - Local commit: e12d79edd1 (branch tony/skill-owner-routing)
 - PR: https://github.com/NousResearch/hermes-agent/pull/87101
 - Precedent plugin: ~/.hermes/plugins/hardproof/ (hooks pattern)
