@@ -1,5 +1,5 @@
 # SPEC-2 — Dashboard & Desktop Kit Surface
-Owner profile: `frontend` | Status: v1.0 (crew-reviewed, amendments merged 2026-08-24) | Spec-only — no build authorized yet
+Owner profile: `frontend` | Status: v1.1 (crew-reviewed 2026-08-24; reconciled to shipped behavior 2026-09-13)
 
 ## Objective
 Define the user-facing surface of `skill-owner-routing` so the plugin ships
@@ -37,12 +37,14 @@ Row states: `clean` (StatusDot green), `drifted` (amber), `unowned` (gray) —
 new skills lacking owner metadata, `unknown-owner` (amber, hollow) — owner_profile
 names a profile that is not registered, `duplicate` (red) — global+profile copies.
 Click → detail drawer: frontmatter summary, ownership rationale (hoarding-justified
-or not), route history, actions.
+or not), route history. No actions ship in the drawer (roadmap).
 
 ### V2 — Drift Feed
-Time-ordered findings from the watchdog: what drifted, when, severity, proposed
-fix (e.g. "move to trt, archive global copy"), resolve action → mutation to
-`plugin_api.py` (approval-gated, confirm dialog via ConfirmDialog).
+Findings from the watchdog, grouped under severity-chip headers in the
+stable ledger order — (kind, skill) alphabetical: what drifted, severity,
+proposed fix (e.g. "move to trt, archive global copy"), discovery
+timestamp, resolve action → mutation to `plugin_api.py` (approval-gated,
+confirm dialog via ConfirmDialog). Time-ordered display is roadmap.
 Drift Feed rows and the resolve mutation serialize the canonical findings
 record from SPEC-0 Interface 3 (fields as defined there; kind enum values
 render directly).
@@ -79,6 +81,7 @@ GET  /api/plugins/skill-owner-routing/policy            → {enabled, require_ow
                                                           key_present, core_enforces, posture}
 PUT  /api/plugins/skill-owner-routing/policy            → gated write; returns resulting policy + config diff
 POST /api/plugins/skill-owner-routing/drift/{id}/resolve → confirm-gated; returns the resolved finding
+WS   /api/plugins/skill-owner-routing/events              → push "invalidate" pings (UI keeps polling as the floor)
 ```
 Error shape: FastAPI default + `detail` human message; UI renders ErrorState with
 retry. All mutations return the resulting state for optimistic-rollback clarity.
@@ -94,8 +97,11 @@ retry. All mutations return the resulting state for optimistic-rollback clarity.
   `usePluginI18n(id)` IS the t function — never destructure `{ t }` from it.
 - Live brand note: personal Obsidian & Crimson aesthetic is NOT imported here —
   this is a shipped public plugin; theme-native is the brand.
-- Severity enum: `info | warning | critical` on every finding; StatusDot and
-  chip color derive from theme semantic vars keyed by severity.
+- Severity vocabulary (as shipped): the dashboard API normalizes the
+  engine's native low/medium/high to info/warning/critical at its REST
+  boundary (low→info, medium→warning, high→critical — a total, stable
+  mapping). StatusDot and chip color derive from theme semantic vars
+  keyed by severity.
 
 ## Desktop Kit readiness
 - Kit subset: `desktop/ + dashboard/ + tests/ + docs md` copy verbatim into
@@ -103,9 +109,20 @@ retry. All mutations return the resulting state for optimistic-rollback clarity.
   (`skill_owner_routing/` + plugin.yaml) stays in the unified install folder;
   kit README links the engine install. (Kit precedent folders ship no
   plugin.yaml — spotify-desktop shape: dashboard/manifest.json, desktop/,
-  tests/, scripts/, *.md.)
+  tests/, *.md. This kit ships no `scripts/` directory; if helper scripts
+  are ever added they land with the roadmap items below.)
 - `defaultEnabled: false` on the desktop half per SDK opt-in rule. Gate layers are distinct: the Python/enforcement half is default-ON once the user enables the plugin via `plugins.enabled` (config key absent = ENABLED, per SPEC-1); the desktop UI half is separately OFF until the in-app toggle is flipped. "Off until user acts" applies ONLY to the desktop UI toggle. This matches Tony's opt-in-install (enable the plugin) + default-ON read (post-install policy).
 - README with toggle instructions ("Settings → Plugins → flip it on") + screenshot.
+
+## Roadmap / not yet implemented
+Collected here so the sections above describe only what the kit ships:
+- **Detail-drawer actions** — the drawer is read-only (frontmatter summary,
+  rationale, route history); quick actions (e.g. resolve, re-scan one skill)
+  are not implemented.
+- **Time-ordered Drift Feed** — the feed renders findings grouped under
+  severity headers in the stable ledger order (kind, skill); sorting by
+  discovery time is not implemented.
+- **Kit helper scripts** — no `scripts/` directory ships in the kit subset.
 
 ## Acceptance for this spec
 Frontend reviews: information architecture (is the map the right main view?),
