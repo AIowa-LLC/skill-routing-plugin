@@ -23,6 +23,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "dashboard"))
 
 import plugin_api  # noqa: E402
+from conftest import TEST_SESSION_HEADER, TEST_SESSION_TOKEN  # noqa: E402
+
+AUTH_HEADERS = {TEST_SESSION_HEADER: TEST_SESSION_TOKEN}
 
 SKILL_TMPL = """---
 name: {name}
@@ -82,7 +85,7 @@ def fleet(tmp_path, monkeypatch):
 def client(fleet):
     app = FastAPI()
     app.include_router(plugin_api.router, prefix="/api/plugins/skill-owner-routing")
-    with TestClient(app) as tc:
+    with TestClient(app, headers={TEST_SESSION_HEADER: TEST_SESSION_TOKEN}) as tc:
         yield tc
 
 
@@ -411,8 +414,17 @@ def test_engine_absent_graceful(client, monkeypatch):
 
 # -- websocket ------------------------------------------------------------------
 
+def _ws_connect(client, path):
+    """Authenticated loopback-origin WS connect (SECURITY-CONTRACT §WS)."""
+    sep = "&" if "?" in path else "?"
+    return client.websocket_connect(
+        f"{path}{sep}token={TEST_SESSION_TOKEN}",
+        headers={"origin": "http://localhost:5173"},
+    )
+
+
 def test_ws_events_push_on_policy_write(client):
-    with client.websocket_connect(f"{API}/events") as ws:
+    with _ws_connect(client, f"{API}/events") as ws:
         res = client.put(f"{API}/policy", json={"enabled": True})
         assert res.status_code == 200
         assert ws.receive_text() == "invalidate"
@@ -421,6 +433,6 @@ def test_ws_events_push_on_policy_write(client):
 def test_ws_events_push_on_resolve(client):
     client.get(f"{API}/map")
     finding = client.get(f"{API}/drift").json()["findings"][0]
-    with client.websocket_connect(f"{API}/events") as ws:
+    with _ws_connect(client, f"{API}/events") as ws:
         assert client.post(f"{API}/drift/{finding['id']}/resolve").status_code == 200
         assert ws.receive_text() == "invalidate"

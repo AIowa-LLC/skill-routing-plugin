@@ -31,16 +31,19 @@ def pre_tool_call(**kwargs: Any) -> Optional[Dict[str, str]]:
     try:
         return _decide(kwargs)
     except Exception as exc:
-        # FAIL-CLOSED (2026-09-12 ruling): an unexpected gate error on a
-        # skill_manage call must block the mutation, never silently allow it.
-        # The message is deliberately distinct from a policy violation.
+        # FAIL-CLOSED (2026-09-12 ruling + SECURITY-CONTRACT §Gate): an
+        # unexpected gate error on a skill_manage call must block the
+        # mutation, never silently allow it. The message is deliberately
+        # distinct from a policy violation; only the exception CLASS is
+        # exposed, never its text or inputs.
         logger.exception("skill-owner-routing gate error (fail-closed)")
         return _block(
             f"skill-owner-routing gate error (fail-closed): the routing gate "
             f"could not evaluate this skill_manage call "
             f"({type(exc).__name__}) and blocked it to be safe. This is a "
             f"gate malfunction, not a policy violation. Please retry the "
-            f"call; if it fails again, report this with the log traceback."
+            f"call; if it fails again, report this with the log traceback.",
+            error_code="gate-error",
         )
 
 
@@ -163,7 +166,17 @@ def _gate_mutation(action: str, name: str) -> Optional[Dict[str, str]]:
     try:
         content = skill_md.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return None
+        # FAIL-CLOSED (SECURITY-CONTRACT §Gate): unreadable required input on
+        # a skill_manage mutation must block, never silently allow.
+        logger.exception("skill-owner-routing gate error (fail-closed)")
+        return _block(
+            f"skill-owner-routing gate error (fail-closed): the routing gate "
+            f"could not read the target skill to evaluate this {action} "
+            f"and blocked it to be safe. This is a gate malfunction, not a "
+            f"policy violation. Please retry the call; if it fails again, "
+            f"report this with the log traceback.",
+            error_code="gate-error",
+        )
 
     owner = declared_skill_owner(content)
 
@@ -228,5 +241,9 @@ def _active_profile() -> "str | None":
         return None
 
 
-def _block(message: str) -> Dict[str, str]:
-    return {"action": "block", "message": message}
+def _block(message: str, error_code: str = "policy-violation") -> Dict[str, str]:
+    """Block directive. ``error_code`` distinguishes policy violations
+    (default) from gate malfunctions ("gate-error") for consumers that read
+    it; the host hook schema currently consumes only action/message and
+    tolerates the extra key (forward-compatible)."""
+    return {"action": "block", "message": message, "error_code": error_code}

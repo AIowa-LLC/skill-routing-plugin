@@ -336,7 +336,13 @@ def test_B4b_audit_run_rest_contract(fleet_b, monkeypatch, tmp_path):
     # Mount exactly like the web-server loader does (web_server._mount_plugin_api_routes):
     # plugin routers expose bare paths; the /api/plugins/<name> prefix is applied here.
     app.include_router(router, prefix="/api/plugins/skill-owner-routing")
-    client = TestClient(app)
+    _conf_spec = importlib.util.spec_from_file_location(
+        "tests_conftest_auth", api_path.parent.parent / "tests" / "conftest.py"
+    )
+    assert _conf_spec is not None and _conf_spec.loader is not None
+    _conf = importlib.util.module_from_spec(_conf_spec)
+    _conf_spec.loader.exec_module(_conf)
+    client = TestClient(app, headers={_conf.TEST_SESSION_HEADER: _conf.TEST_SESSION_TOKEN})
 
     monkeypatch.setenv("HERMES_HOME", str(fleet_b))
 

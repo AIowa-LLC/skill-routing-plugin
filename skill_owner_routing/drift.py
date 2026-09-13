@@ -138,7 +138,8 @@ def _skills_in(home: Path) -> List[Tuple[str, Path]]:
                 continue  # alias to another home's skill — counted there, not here
             skill_md = child / "SKILL.md"
             if skill_md.is_file():
-                found.append((child.name, skill_md))
+                if _contained_skill_md(home, skill_md):
+                    found.append((child.name, skill_md))
                 continue
             grandchildren = sorted(child.iterdir())
         except OSError:
@@ -153,10 +154,52 @@ def _skills_in(home: Path) -> List[Tuple[str, Path]]:
                     continue  # alias to another home's skill
                 nested = grandchild / "SKILL.md"
                 if nested.is_file():
-                    found.append((grandchild.name, nested))
+                    if _contained_skill_md(home, nested):
+                        found.append((grandchild.name, nested))
             except OSError:
                 continue  # unreadable/undiscoverable — skip this grandchild only
     return found
+
+
+_SKIP_WARN_CAP = 32
+_skip_warns: list = []
+
+
+def _contained_skill_md(home: Path, skill_md: Path) -> bool:
+    """M11 (SECURITY-CONTRACT): a SKILL.md reachable only through a symlink
+    component, or resolving outside the fleet root / scanned home, is never
+    indexed — the discovery read must not escape the fleet root and disclose
+    outside content. Uncertainty means skip + bounded warning, never read."""
+    try:
+        skills_dir = home / "skills"
+        target_real = skill_md.resolve()
+        if not target_real.is_relative_to(home.resolve()):
+            _warn_skip()
+            return False
+        if skill_md.is_symlink():
+            _warn_skip()
+            return False
+        rel = skill_md.relative_to(skills_dir)
+        cur = skills_dir
+        for part in rel.parts:
+            cur = cur / part
+            if cur.is_symlink():
+                _warn_skip()
+                return False
+        return True
+    except OSError:
+        _warn_skip()
+        return False
+
+
+def _warn_skip() -> None:
+    import time as _time
+
+    _skip_warns.append(_time.monotonic())
+    del _skip_warns[:-_SKIP_WARN_CAP]
+    logger.warning(
+        "skill-owner-routing: skill path failed containment validation; skipped"
+    )
 
 
 def _resolves_within(path: Path, root: Path) -> bool:

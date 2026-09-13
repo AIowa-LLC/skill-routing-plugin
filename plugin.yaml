@@ -4,6 +4,32 @@ description: "Fleet skill ownership enforcement: creation routing, sideways-writ
 author: skill-owner-routing contributors
 license: MIT
 kind: standalone
+# i12 (SECURITY-CONTRACT §Manifest): explicit least-privilege declaration.
+# NOTE: the current Hermes host manifest schema does not define these fields
+# (it tolerates unknown keys with a warning); this block is the contract's
+# canonical spelling and is enforced by this repo's release validation
+# (tests/test_security_contract.py :: TestManifestLeastPrivilege).
+permissions:
+  filesystem:
+    read:
+      - "$HERMES_HOME/skills"
+      - "$HERMES_HOME/profiles/*/skills"
+    write:
+      - "$HERMES_HOME/config.yaml::skills.owner_routing"
+      - "$HERMES_HOME/skill-owner-routing/state.json"
+      - "$HERMES_HOME/skills/.skill_owner_findings.json"
+  network: []
+  secrets: []
+  data_scope:
+    reads:
+      - allowlisted-frontmatter
+      - ownership-drift-ledger
+      - policy
+    writes:
+      - policy
+      - resolution-status
+      - audit-state
+  external_transmission: false
 provides_hooks:
   - pre_tool_call
 provides_tools:

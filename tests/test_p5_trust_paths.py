@@ -272,7 +272,9 @@ def dash_fleet(tmp_path, monkeypatch):
 def dash_client(dash_fleet):
     app = FastAPI()
     app.include_router(plugin_api.router, prefix="/api/plugins/skill-owner-routing")
-    with TestClient(app) as tc:
+    from conftest import TEST_SESSION_HEADER, TEST_SESSION_TOKEN
+
+    with TestClient(app, headers={TEST_SESSION_HEADER: TEST_SESSION_TOKEN}) as tc:
         yield tc
 
 
