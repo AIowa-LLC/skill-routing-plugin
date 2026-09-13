@@ -260,7 +260,14 @@ def snapshot_tree(root: Path) -> dict:
         # dot-files are sidecars/ledgers (usage, curator ledger, plugin
         # findings store) — plugin-owned state, not fleet skill content
         if p.is_file() and not p.is_symlink() and not p.name.startswith("."):
-            snap[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
+            rel = p.relative_to(root)
+            # Core writes backups/config/*.good.* recovery copies when it
+            # READS config (load_user_config_effective) — a read-side side
+            # effect of the host, not a gate mutation; snapshots judge what
+            # the gate controls. Introduced by core b91088d7 (2026-09-12).
+            if "backups" in rel.parts:
+                continue
+            snap[str(rel)] = hashlib.sha256(p.read_bytes()).hexdigest()
     return snap
 
 
