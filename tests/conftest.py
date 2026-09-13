@@ -66,6 +66,21 @@ def fleet(tmp_path, monkeypatch):
     common.reset_caches()
 
 
+# --- P7 security-contract test credential ---------------------------------
+# Fixed high-entropy token for the whole suite (SECURITY-CONTRACT §REST:
+# HERMES_DASHBOARD_SESSION_TOKEN as X-Hermes-Session-Token). Existing
+# functional tests send it via AuthedTestClient; the security tests
+# additionally exercise the no-credential and wrong-credential paths.
+TEST_SESSION_TOKEN = "test-session-token-0123456789abcdef0123456789abcdef"
+TEST_SESSION_HEADER = "X-Hermes-Session-Token"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _security_contract_token():
+    os.environ.setdefault("HERMES_DASHBOARD_SESSION_TOKEN", TEST_SESSION_TOKEN)
+    yield
+
+
 @pytest.fixture()
 def enabled_config(fleet):
     fleet["root"].joinpath("config.yaml").write_text(

@@ -183,6 +183,21 @@ m.default.register({
   socket: () => () => {}
 })
 const byArea = a => areas.filter(c => c.area === a)
+
+// -- P7 security contract: SDK-only transport --------------------------------
+// SECURITY-CONTRACT §REST: desktop plugin.js must use the SDK doors
+// (ctx.rest / ctx.socket) for every REST/WS call — never raw fetch, never
+// window token globals. Verified statically against the comment-stripped
+// source (the register() call above already proves the ctx surface works).
+console.log('\n== security contract: SDK-only transport ==')
+check(!/\bfetch\s*\(/.test(noComments), 'no raw fetch( calls')
+check(!/XMLHttpRequest|EventSource/.test(noComments), 'no XHR / EventSource')
+check(!/__HERMES_SESSION_TOKEN__|__HERMES_AUTH_REQUIRED__/.test(noComments), 'no window token globals read')
+check(!/window\.(open|location)\s*=/.test(noComments), 'no navigation side effects')
+check(/restRef\s*=\s*ctx\.rest/.test(noComments), 'transport binds ctx.rest (SDK door)')
+check(/ctx\.socket\(\s*'\/events'/.test(noComments), 'live push binds ctx.socket (SDK door)')
+check(typeof m.auditOutcome === 'function', 'auditOutcome exported')
+
 check(areas.length === 6, 'registerMany received 6 contributions', String(areas.length))
 const route = byArea('routes')
 check(route.length === 1 && route[0].data.path === '/skill-ownership', 'V1 route at /skill-ownership')

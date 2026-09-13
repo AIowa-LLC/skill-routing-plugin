@@ -50,20 +50,23 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import importlib
 import json
+import logging
 import os
 import re
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict
 
 try:  # sibling module when imported standalone by the web server loader
@@ -75,6 +78,8 @@ except ImportError:  # pragma: no cover — arbitrary-name file loads (QA harnes
     from home_override import _engine_call, _home_override  # type: ignore
 
 router = APIRouter()
+
+logger = logging.getLogger("skill-owner-routing.dashboard")
 
 PLUGIN_ID = "skill-owner-routing"
 STATE_RELPATH = "skill-owner-routing/state.json"
@@ -223,6 +228,239 @@ def _justification_of(fm: Dict[str, Any]) -> Optional[str]:
             if isinstance(raw, str) and raw.strip().lower() in _JUSTIFICATIONS:
                 return raw.strip().lower()
     return None
+
+
+# ---------------------------------------------------------------------------
+# Security primitives — SECURITY-CONTRACT.md (REST auth, WS Origin, redaction)
+# ---------------------------------------------------------------------------
+
+#: Standalone/plugin-test credential (SECURITY-CONTRACT §REST): the same env
+#: var the Hermes web server resolves its session token from. Unset in host
+#: mounts — there the host's /api middlewares authenticate before we run, and
+#: we defer to their verdict flags (``request.state``) instead.
+_SESSION_HEADER = "X-Hermes-Session-Token"
+
+#: Minimum entropy floor for a standalone credential. Short/low-entropy values
+#: fail closed (every route stays protected) rather than becoming a weak gate.
+_MIN_TOKEN_BYTES = 16  # 128 bits
+_MIN_TOKEN_CHARS = 22  # len(secrets.token_urlsafe(16))
+
+_AUTH_LOCK = threading.Lock()
+_CACHED_TOKEN: List[Optional[str]] = [None]  # resolved token (None until read)
+_CACHED_TOKEN_AT: List[float] = [0.0]
+
+
+def _standalone_token() -> Optional[str]:
+    """Resolve HERMES_DASHBOARD_SESSION_TOKEN once; None when unset/too weak.
+
+    Cached for process lifetime (the env cannot meaningfully change under a
+    running server; re-reading per request buys nothing and would let a weak
+    value flip the gate open mid-run). Weak values (short strings) are treated
+    as unset — fail closed, routes stay protected.
+    """
+    env_name = "HERMES_DASHBOARD_SESSION_TOKEN"
+    now = time.monotonic()
+    with _AUTH_LOCK:
+        if _CACHED_TOKEN_AT[0] and now - _CACHED_TOKEN_AT[0] < 3600.0:
+            return _CACHED_TOKEN[0]
+        raw = os.environ.get(env_name, "")
+        token = raw.strip() if raw else ""
+        if len(token) < _MIN_TOKEN_CHARS or len(token.encode("utf-8", "replace")) < _MIN_TOKEN_BYTES:
+            token = None  # unset or below entropy floor → fail closed
+        _CACHED_TOKEN[0] = token
+        _CACHED_TOKEN_AT[0] = now
+        return token
+
+
+def _reset_auth_cache() -> None:
+    """Test hook: drop the cached standalone-token resolution."""
+    with _AUTH_LOCK:
+        _CACHED_TOKEN[0] = None
+        _CACHED_TOKEN_AT[0] = 0.0
+
+
+def _request_authed(request: Request) -> bool:
+    """True when the request carries a credential this API accepts.
+
+    Host mounts: the Hermes web server authenticates ``/api`` before the
+    plugin router runs (session token, bearer principal, or cookie session)
+    and stamps ``request.state.token_authenticated`` / ``request.state.session``
+    — either flag means a host-trusted caller. Loopback host mounts with a
+    per-process token stamp no flag, so the same header the host accepted is
+    also compared against the live host token. Standalone/QA mounts: require
+    the exact ``X-Hermes-Session-Token`` header against a nonempty
+    high-entropy ``HERMES_DASHBOARD_SESSION_TOKEN`` (constant-time compare).
+    Never a REST query token; localhost is not a bypass.
+    """
+    # Host-authenticated callers (loopback token, OAuth cookie session, or
+    # bearer token principal). Only the boolean verdicts are read — never
+    # their payloads.
+    if getattr(request.state, "token_authenticated", False):
+        return True
+    if getattr(request.state, "session", None) is not None:
+        return True
+    presented = _presented_token(request)
+    if not presented:
+        return False
+    # Standalone credential (env-resolved, entropy-floored).
+    expected = _standalone_token()
+    if expected is not None and hmac.compare_digest(
+        presented.encode("utf-8", "replace"), expected.encode("utf-8", "replace")
+    ):
+        return True
+    # Live host token (loopback mounts where the host minted a per-process
+    # session token and authenticated the caller without stamping state).
+    # Read dynamically — the SSH/desktop path can replace it after import.
+    # Only consulted when the host module is already loaded: standalone
+    # deployments must not grow an import of the host server.
+    host_mod = sys.modules.get("hermes_cli.web_server")
+    if host_mod is not None:
+        host_token = getattr(host_mod, "_SESSION_TOKEN", None)
+        if isinstance(host_token, str) and host_token and hmac.compare_digest(
+            presented.encode("utf-8", "replace"), host_token.encode("utf-8", "replace")
+        ):
+            return True
+    return False
+
+
+def _presented_token(request: Request) -> str:
+    """The bearer credential as the host's own gate reads it (dedicated
+    header first, legacy ``Authorization: Bearer`` spelling second)."""
+    header = request.headers.get(_SESSION_HEADER, "")
+    if header:
+        return header
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
+
+
+async def _require_auth(request: Request) -> None:
+    """Route dependency: generic 401 on missing/invalid credential.
+
+    Missing and wrong credentials are deliberately indistinguishable; 403 is
+    reserved for a future authenticated-but-unauthorized principal and is not
+    used in this release.
+    """
+    if not _request_authed(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+_WS_TICKETS: Dict[str, Tuple[float, str]] = {}
+_WS_TICKET_TTL = 30.0  # seconds — parity with the host's ws_tickets.TTL_SECONDS
+#: Bounded warning when a WS upgrade fails validation (no reason detail: the
+#: rejection must not reveal which check failed).
+_WS_REJECT_LOG_CAP = 16
+
+
+def _mint_ws_ticket() -> Optional[str]:
+    """Single-use short-lived ticket for standalone WS upgrades.
+
+    Mirrors the host's POST /api/auth/ws-ticket semantics (30s, one-use). In
+    host mounts the SDK's ticket flow goes through the host endpoint; this
+    path exists so a standalone deployment has an equivalent mechanism.
+    """
+    import secrets
+
+    expected = _standalone_token()
+    if expected is None:
+        return None  # no standalone credential configured — fail closed
+    ticket = secrets.token_urlsafe(32)
+    now = time.time()
+    with _AUTH_LOCK:
+        # GC expired entries on mint (bounded memory)
+        for t in [t for t, (exp, _) in _WS_TICKETS.items() if exp < now]:
+            _WS_TICKETS.pop(t, None)
+        _WS_TICKETS[ticket] = (now + _WS_TICKET_TTL, "standalone")
+    return ticket
+
+
+def _consume_ws_ticket(ticket: str) -> bool:
+    """Validate + consume a single-use ticket (True when valid)."""
+    if not ticket:
+        return False
+    with _AUTH_LOCK:
+        entry = _WS_TICKETS.pop(ticket, None)
+    if entry is None:
+        return False
+    expires_at, _info = entry
+    return expires_at >= time.time()
+
+
+def _ws_origin_allowed(origin: str) -> bool:
+    """Strict Origin allowlist for the /events WebSocket.
+
+    Loopback: exact ``http(s)://(localhost|127.0.0.1|[::1])(:port)?`` with any
+    explicit port. Public: the exact scheme+lowercase-host+effective-port of
+    ``dashboard.public_url`` when configured. Rejects null/absent/malformed
+    origins, credentials-in-URL, non-root paths, query/fragment, arbitrary
+    DNS/subdomains, and wildcards.
+    """
+    if not origin or not isinstance(origin, str):
+        return False
+    parsed = urllib.parse.urlsplit(origin.strip())
+    if parsed.scheme not in ("http", "https"):
+        return False
+    if not parsed.netloc:
+        return False
+    if parsed.username or parsed.password:
+        return False  # credentials embedded in origin
+    if parsed.path not in ("", "/"):
+        return False
+    if parsed.query or parsed.fragment:
+        return False
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        return False
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True  # any explicit port allowed on loopback
+    # Non-loopback host: only the exact configured public origin.
+    public = _public_ws_origin()
+    if public is None:
+        return False
+    pub_scheme, pub_host, pub_port = public
+    if parsed.scheme != pub_scheme:
+        return False
+    effective = port if port is not None else (443 if parsed.scheme == "https" else 80)
+    pub_effective = pub_port if pub_port is not None else (443 if pub_scheme == "https" else 80)
+    return host == pub_host and effective == pub_effective
+
+
+def _public_ws_origin() -> Optional[Tuple[str, str, Optional[int]]]:
+    """(scheme, lowercase host, port|None) from dashboard.public_url, or None.
+
+    Resolution order mirrors the host's resolver: the
+    ``HERMES_DASHBOARD_PUBLIC_URL`` env var, then ``dashboard.public_url`` in
+    the served home's config.yaml. Absent/malformed values fail closed (None).
+    """
+    public_url = os.environ.get("HERMES_DASHBOARD_PUBLIC_URL", "").strip()
+    if not public_url:
+        try:
+            cfg = yaml.safe_load(
+                (_default_home() / "config.yaml").read_text(encoding="utf-8", errors="replace")
+            ) or {}
+        except Exception:
+            cfg = {}
+        raw = cfg.get("dashboard") if isinstance(cfg, dict) else None
+        public_url = str(raw.get("public_url") or "").strip() if isinstance(raw, dict) else ""
+    if not public_url:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(public_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return None
+        port: Optional[int]
+        try:
+            port = parsed.port
+        except ValueError:
+            return None
+        return (parsed.scheme, parsed.hostname.lower(), port)
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +749,9 @@ def _skills_in_scope(skills_dir: Path, scope_root: Path) -> List[Path]:
 
     Category-nested skills (skills/<category>/<name>/SKILL.md) are visible;
     skill dirs that are symlinks resolving outside the scanned home are
-    aliases counted in their real home, not here.
+    aliases counted in their real home, not here. M11: a SKILL.md reachable
+    only through a symlink component, or resolving outside the fleet root,
+    is never indexed (contained read, bounded warning).
     """
     found: List[Path] = []
     try:
@@ -527,7 +767,8 @@ def _skills_in_scope(skills_dir: Path, scope_root: Path) -> List[Path]:
             continue  # alias to another home's skill — counted there, not here
         skill_md = child / "SKILL.md"
         if skill_md.is_file():
-            found.append(skill_md)
+            if _contained_skill_md_fallback(skills_dir, skill_md):
+                found.append(skill_md)
             continue
         try:
             grandchildren = sorted(child.iterdir())
@@ -542,8 +783,30 @@ def _skills_in_scope(skills_dir: Path, scope_root: Path) -> List[Path]:
                 continue  # alias to another home's skill
             nested = grandchild / "SKILL.md"
             if nested.is_file():
-                found.append(nested)
+                if _contained_skill_md_fallback(skills_dir, nested):
+                    found.append(nested)
     return found
+
+
+def _contained_skill_md_fallback(skills_dir: Path, skill_md: Path) -> bool:
+    """M11 containment for the fallback enumeration port (see drift.M11)."""
+    try:
+        if not skill_md.resolve().is_relative_to(skills_dir.resolve()):
+            _warn_m11_skip(skill_md)
+            return False
+        if skill_md.is_symlink():
+            _warn_m11_skip(skill_md)
+            return False
+        cur = skills_dir
+        for part in skill_md.relative_to(skills_dir).parts:
+            cur = cur / part
+            if cur.is_symlink():
+                _warn_m11_skip(skill_md)
+                return False
+        return True
+    except OSError:
+        _warn_m11_skip(skill_md)
+        return False
 
 
 def _enumerate_local(home: Path) -> Dict[str, Any]:
@@ -821,6 +1084,19 @@ def _broadcast(message: str) -> None:
 
 @router.websocket("/events")
 async def events(ws: WebSocket) -> None:
+    # SECURITY-CONTRACT §WebSocket: validate Origin AND authentication
+    # before accept. Rejection is uniform (no reason echoed to the client):
+    # pre-upgrade 403 or close 1008.
+    origin = ws.headers.get("origin", "")
+    if not _ws_origin_allowed(origin):
+        _log_ws_reject()
+        # Pre-upgrade refusal (handshake not yet completed).
+        await ws.close(code=1008)
+        return
+    if not _ws_authenticated(ws):
+        _log_ws_reject()
+        await ws.close(code=1008)
+        return
     await ws.accept()
     loop = asyncio.get_running_loop()
     with _SOCKS_LOCK:
@@ -838,11 +1114,218 @@ async def events(ws: WebSocket) -> None:
                 _LOOPS.discard(loop)
 
 
+_WS_REJECTS: List[float] = []
+
+
+def _log_ws_reject() -> None:
+    """Bounded warning on WS rejection — never which check failed."""
+    now = time.monotonic()
+    _WS_REJECTS.append(now)
+    del _WS_REJECTS[:-_WS_REJECT_LOG_CAP]
+    logger.warning("skill-owner-routing: /events WebSocket upgrade rejected")
+
+
+def _ws_authenticated(ws: WebSocket) -> bool:
+    """WS-upgrade credential check, aligned with the host's own gate.
+
+    Host gate parity (web_server_chat._ws_auth_reason): loopback mode accepts
+    the session-token as ``?token=`` (constant-time); gated mode is
+    ticket-only (``?ticket=`` single-use, 30s TTL — a leaked session token
+    must not grant WS access), with host-minted tickets validated by the
+    host's canonical gate. Standalone mode accepts this module's own
+    single-use tickets or the explicitly-configured session token. Fail
+    closed on anything else.
+    """
+    host_mod = sys.modules.get("hermes_cli.web_server")
+    ticket = ws.query_params.get("ticket", "")
+    token = ws.query_params.get("token", "")
+    if host_mod is not None and _host_app_auth_required(ws):
+        # Gated host mode: ticket-only. Host-minted tickets live in the
+        # host's store — defer to the canonical gate (it consumes them,
+        # enforcing single-use + TTL).
+        if ticket and _consume_ws_ticket(ticket):
+            return True
+        try:
+            from hermes_cli import web_server_chat as _gate
+
+            return bool(_gate._ws_auth_ok(ws))
+        except Exception:
+            return False
+    if ticket:
+        return _consume_ws_ticket(ticket)
+    if not token:
+        return False
+    expected = _standalone_token()
+    if expected is not None and hmac.compare_digest(
+        token.encode("utf-8", "replace"), expected.encode("utf-8", "replace")
+    ):
+        return True
+    if host_mod is not None:
+        host_token = getattr(host_mod, "_SESSION_TOKEN", None)
+        if isinstance(host_token, str) and host_token and hmac.compare_digest(
+            token.encode("utf-8", "replace"), host_token.encode("utf-8", "replace")
+        ):
+            return True
+    return False
+
+
+def _host_app_auth_required(ws: WebSocket) -> bool:
+    """True when the mounting host app runs the OAuth gate (gated mode)."""
+    try:
+        app = ws.scope.get("app")
+        return bool(getattr(getattr(app, "state", None), "auth_required", False))
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
-@router.get("/map")
+#: Compatibility constant for surfaces that require a location.path key
+#: (SECURITY-CONTRACT §Detail redaction): never a real path, never
+#: basename/parents — always this exact constant.
+_REDACTED_PATH = "~/<redacted>"
+_DESCRIPTION_CAP = 1024
+_CATEGORY_CAP = 256
+_ROW_HISTORY_EVENT_PREFIX = "resolved: "
+_KNOWN_FINDING_KINDS = {
+    "drifted",
+    "misplaced-global",
+    "unknown-owner",
+    KIND_DUPLICATE,
+    "unowned",
+}
+
+
+def _safe_owner(owner: Any) -> Optional[str]:
+    """Validated owner_profile (profile-id syntax) or None (SECURITY-CONTRACT
+    §Detail redaction: malformed values are omitted, never echoed)."""
+    if isinstance(owner, str) and _PROFILE_ID_RE.match(owner):
+        return owner
+    return None
+
+
+def _redacted_frontmatter(fm: Dict[str, Any]) -> Dict[str, Any]:
+    """SECURITY-CONTRACT §Detail redaction allowlist — nothing else leaves.
+
+    Allowed: scalar ``name``; ``description`` string capped at 1024 chars;
+    ``metadata.hermes.owner_profile`` matching the profile-id syntax;
+    ``metadata.hermes.global_justification`` in the known set. Malformed
+    allowed values are omitted. Raw frontmatter, bodies, absolute paths,
+    URLs/commands/prompts/credentials and arbitrary nested metadata never
+    leave the API through the detail endpoint.
+    """
+    out: Dict[str, Any] = {}
+    name = fm.get("name")
+    if isinstance(name, str) and name:
+        out["name"] = name
+    description = fm.get("description")
+    if isinstance(description, str) and description:
+        out["description"] = description[:_DESCRIPTION_CAP]
+    meta = fm.get("metadata")
+    hermes = meta.get("hermes") if isinstance(meta, dict) else None
+    if isinstance(hermes, dict):
+        allowed_hermes: Dict[str, str] = {}
+        owner = hermes.get("owner_profile")
+        if isinstance(owner, str) and _PROFILE_ID_RE.match(owner):
+            allowed_hermes["owner_profile"] = owner
+        justification = hermes.get("global_justification")
+        if isinstance(justification, str) and justification.strip().lower() in _JUSTIFICATIONS:
+            allowed_hermes["global_justification"] = justification.strip().lower()
+        if allowed_hermes:
+            out["metadata"] = {"hermes": allowed_hermes}
+    return out
+
+
+def _redacted_history(history_source: List[Dict[str, Any]], skill_name: str) -> List[Dict[str, Any]]:
+    """Fixed known event names + timestamps only (never free-form payloads)."""
+    out: List[Dict[str, Any]] = []
+    for entry in history_source:
+        if not isinstance(entry, dict) or entry.get("skill") != skill_name:
+            continue
+        event = entry.get("event")
+        at = entry.get("at")
+        if not isinstance(event, str) or not event.startswith(_ROW_HISTORY_EVENT_PREFIX):
+            continue
+        kind = event[len(_ROW_HISTORY_EVENT_PREFIX):].split(" (", 1)[0].strip()
+        if kind not in _KNOWN_FINDING_KINDS:
+            continue
+        if at is None or isinstance(at, bool):
+            continue
+        try:
+            stamp = int(at)
+        except (TypeError, ValueError):
+            continue
+        out.append({"event": f"{_ROW_HISTORY_EVENT_PREFIX}{kind}", "at": stamp})
+    return out
+
+
+def _skills_root_for(home: Path, scope: str, profile: Optional[str]) -> Optional[Path]:
+    """Intended skills root for a row scope, validated (M11 containment base)."""
+    if scope == "global":
+        return home / "skills"
+    if scope == "profile" and profile and _PROFILE_ID_RE.match(profile):
+        return home / "profiles" / profile / "skills"
+    return None
+
+
+_M11_SKIPS: List[float] = []
+
+
+def _warn_m11_skip(skill_md: Path) -> None:
+    """Bounded warning that a skill path was skipped (never its content)."""
+    now = time.monotonic()
+    _M11_SKIPS.append(now)
+    del _M11_SKIPS[:-16]
+    logger.warning(
+        "skill-owner-routing: skill path failed containment validation and was skipped"
+    )
+
+
+def _read_skill_md_contained(
+    home: Path, skills_root: Path, skill_md: Path
+) -> Optional[str]:
+    """M11: contained, symlink-free SKILL.md read — content or None.
+
+    Resolves the complete path and requires it beneath BOTH the fleet root
+    and the intended skills root; rejects any symlink component between the
+    skills root and the file (directory or file symlinks); rechecks the
+    final component immediately before the read. Uncertainty means skip (+
+    bounded warning), never read the target.
+    """
+    try:
+        fleet_real = home.resolve()
+        skills_real = skills_root.resolve()
+        target_real = skill_md.resolve()
+    except OSError:
+        _warn_m11_skip(skill_md)
+        return None
+    if not target_real.is_relative_to(fleet_real) or not target_real.is_relative_to(skills_real):
+        _warn_m11_skip(skill_md)
+        return None
+    try:
+        rel = skill_md.relative_to(skills_root)
+        cur = skills_root
+        for part in rel.parts:
+            cur = cur / part
+            if cur.is_symlink():
+                _warn_m11_skip(skill_md)
+                return None
+        # Recheck immediately before read: regular file, not a symlink.
+        if skill_md.is_symlink() or not skill_md.is_file():
+            _warn_m11_skip(skill_md)
+            return None
+    except OSError:
+        _warn_m11_skip(skill_md)
+        return None
+    try:
+        return skill_md.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+@router.get("/map", dependencies=[Depends(_require_auth)])
 def get_map() -> Dict[str, Any]:
     home = _default_home()
     with _STATE_LOCK:
@@ -851,12 +1334,30 @@ def get_map() -> Dict[str, Any]:
         rows = list(state.get("rows", []))
         last_audit = _last_audit_ts(state, _live_findings(state, home))
         _save_state(state, home)
+    out_rows: List[Dict[str, Any]] = []
     for row in rows:
         row["last_audit"] = last_audit
-    return {"rows": rows, "meta": {"profiles": state.get("profiles", []), "last_audit_ts": last_audit}}
+        loc = row.get("location") or {}
+        out_rows.append(
+            {
+                **row,
+                # SECURITY-CONTRACT §Detail redaction: absolute paths never
+                # leave the API; the key stays (V1 compatibility) as a constant.
+                "location": {
+                    "scope": loc.get("scope"),
+                    "profile": loc.get("profile") if _PROFILE_ID_RE.match(str(loc.get("profile") or "")) else None,
+                    "path": _REDACTED_PATH,
+                },
+                # Unvalidated frontmatter-derived values never leave the API:
+                # owner must match profile-id syntax, category is bounded.
+                "owner_profile": _safe_owner(row.get("owner_profile")),
+                "category": str(row.get("category") or "")[:_CATEGORY_CAP],
+            }
+        )
+    return {"rows": out_rows, "meta": {"profiles": state.get("profiles", []), "last_audit_ts": last_audit}}
 
 
-@router.get("/map/{skill_id}")
+@router.get("/map/{skill_id}", dependencies=[Depends(_require_auth)])
 def get_map_detail(skill_id: str) -> Dict[str, Any]:
     home = _default_home()
     with _STATE_LOCK:
@@ -868,15 +1369,45 @@ def get_map_detail(skill_id: str) -> Dict[str, Any]:
     row = next((r for r in rows if r["skill_id"] == skill_id), None)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Skill {skill_id!r} is not mapped.")
-    skill_md = Path(row["location"]["path"]) / "SKILL.md"
-    try:
-        fm = _parse_frontmatter(skill_md.read_text(encoding="utf-8", errors="replace"))
-    except OSError:
-        fm = {}
-    owner, scope = row.get("owner_profile"), row["location"]["scope"]
+    loc = row.get("location") or {}
+    scope, profile = loc.get("scope"), loc.get("profile")
+    skills_root = _skills_root_for(home, str(scope or ""), profile)
+    fm: Dict[str, Any] = {}
+    if skills_root is not None and isinstance(loc.get("path"), str) and loc.get("path"):
+        # M11: contained, symlink-free read; None means skip (bounded warning).
+        content = _read_skill_md_contained(home, skills_root, Path(loc["path"]) / "SKILL.md")
+        if content is not None:
+            fm = _parse_frontmatter(content)
+    owner = _safe_owner(row.get("owner_profile"))
+    safe_profile = profile if _PROFILE_ID_RE.match(str(profile or "")) else None
+    rationale = _rationale_for(row, owner, scope, fm, safe_profile)
+    return {
+        "skill_id": skill_id,
+        "name": row["name"],
+        "owner_profile": owner,
+        "location": {
+            "scope": scope,
+            "profile": safe_profile,
+            "path": _REDACTED_PATH,
+        },
+        "state": row["state"],
+        "frontmatter": _redacted_frontmatter(fm),
+        "rationale": rationale,
+        "history": _redacted_history(history_source, row["name"]),
+    }
+
+
+def _rationale_for(
+    row: Dict[str, Any],
+    owner: Optional[str],
+    scope: Any,
+    fm: Dict[str, Any],
+    safe_profile: Optional[str],
+) -> Dict[str, Any]:
+    """Rationale copy — fixed templates over validated fields only."""
     if scope == "global":
         justified = _justification_of(fm) is not None
-        rationale = {
+        return {
             "hoarding_justified": justified,
             "text": (
                 f"Global scope justified as {_justification_of(fm)}."
@@ -885,34 +1416,21 @@ def get_map_detail(skill_id: str) -> Dict[str, Any]:
                 "verified-structural-dependency justification."
             ),
         }
-    elif row["state"] == "drifted":
-        rationale = {
+    if row["state"] == "drifted":
+        where = f"{scope} {safe_profile}".strip() if safe_profile else str(scope)
+        return {
             "hoarding_justified": False,
-            "text": f"Owner profile {owner!r}; actual location {scope} "
-            f"{row['location'].get('profile') or ''}".strip() + ".",
+            "text": f"Owner profile {owner!r}; actual location {where}.",
         }
-    elif row["state"] == "unowned":
-        rationale = {
+    if row["state"] == "unowned":
+        return {
             "hoarding_justified": False,
             "text": "No owner_profile declared — new skills should declare "
             "metadata.hermes.owner_profile.",
         }
-    else:
-        rationale = {"hoarding_justified": None, "text": f"Owned by {owner!r}." if owner else "No owner declared."}
-    history = [
-        {"event": h["event"], "at": h["at"]}
-        for h in history_source
-        if h.get("skill") == row["name"]
-    ]
     return {
-        "skill_id": skill_id,
-        "name": row["name"],
-        "owner_profile": owner,
-        "location": row["location"],
-        "state": row["state"],
-        "frontmatter": fm,
-        "rationale": rationale,
-        "history": history,
+        "hoarding_justified": None,
+        "text": f"Owned by {owner!r}." if owner else "No owner declared.",
     }
 
 
@@ -935,7 +1453,7 @@ def _ensure_ledger_populated(home: Path) -> None:
         _engine_call(engine, "scan", home, submodule="drift")
 
 
-@router.get("/drift")
+@router.get("/drift", dependencies=[Depends(_require_auth)])
 def get_drift() -> Dict[str, Any]:
     home = _default_home()
     _ensure_ledger_populated(home)
@@ -946,7 +1464,7 @@ def get_drift() -> Dict[str, Any]:
     return {"findings": findings, "meta": {k: meta[k] for k in ("open_count", "counts_by_severity")}}
 
 
-@router.get("/drift/summary")
+@router.get("/drift/summary", dependencies=[Depends(_require_auth)])
 def get_drift_summary() -> Dict[str, Any]:
     home = _default_home()
     _ensure_ledger_populated(home)
@@ -956,7 +1474,7 @@ def get_drift_summary() -> Dict[str, Any]:
     return {"open_count": meta["open_count"], "worst_severity": meta["worst_severity"]}
 
 
-@router.post("/audit/run", status_code=202)
+@router.post("/audit/run", status_code=202, dependencies=[Depends(_require_auth)])
 def post_audit_run() -> Dict[str, Any]:
     home = _default_home()
     run_id = uuid.uuid4().hex[:12]
@@ -968,7 +1486,7 @@ def post_audit_run() -> Dict[str, Any]:
     return {"run_id": run_id}
 
 
-@router.get("/audit/runs/{run_id}")
+@router.get("/audit/runs/{run_id}", dependencies=[Depends(_require_auth)])
 def get_audit_run(run_id: str) -> Dict[str, Any]:
     with _STATE_LOCK:
         state = _load_state(_default_home())
@@ -978,7 +1496,7 @@ def get_audit_run(run_id: str) -> Dict[str, Any]:
     return {"state": run.get("state"), "findings_count": run.get("findings_count")}
 
 
-@router.get("/policy")
+@router.get("/policy", dependencies=[Depends(_require_auth)])
 def get_policy() -> Dict[str, Any]:
     home = _default_home()
     policy = _read_policy_home(home)
@@ -1001,7 +1519,7 @@ class PolicyPatch(BaseModel):
     confirm: Optional[bool] = None
 
 
-@router.put("/policy")
+@router.put("/policy", dependencies=[Depends(_require_auth)])
 def put_policy(patch: PolicyPatch) -> Dict[str, Any]:
     if patch.confirm is False:
         raise HTTPException(status_code=400, detail="Policy write not confirmed.")
@@ -1028,7 +1546,7 @@ def put_policy(patch: PolicyPatch) -> Dict[str, Any]:
     return {"policy": policy_view, "config_diff": diff}
 
 
-@router.post("/drift/{finding_id}/resolve")
+@router.post("/drift/{finding_id}/resolve", dependencies=[Depends(_require_auth)])
 def post_resolve(finding_id: str) -> Dict[str, Any]:
     home = _default_home()
     engine = _load_engine()

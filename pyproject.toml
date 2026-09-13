@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skill-owner-routing"
+version = "0.1.0"
+description = "Fleet skill ownership enforcement: creation routing, sideways-write denial, ownership drift watchdog, No-Specialist-Hoarding lint."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "skill-owner-routing contributors" }]
+# i11 (SECURITY-CONTRACT §Dependencies): authoritative runtime deps for the
+# dashboard API surface. Constraints are compatible with the supported
+# Hermes web extra (fastapi>=0.104.0,<1 / pydantic 2.x / PyYAML 6.x) and its
+# release lock policy. A requirements.txt may supplement, never substitute.
+dependencies = [
+    "PyYAML>=6.0.1,<7",
+    "fastapi>=0.104.0,<1",
+    "pydantic>=2.5,<3",
+]
+
+[project.optional-dependencies]
+# The plugin's full runtime also uses the ASGI server the host provides;
+# standalone deployments install this extra to run the dashboard directly.
+web = ["uvicorn>=0.29,<1"]
+
+[tool.setuptools]
+py-modules = []
+
+[tool.setuptools.packages.find]
+include = ["skill_owner_routing*", "dashboard*"]

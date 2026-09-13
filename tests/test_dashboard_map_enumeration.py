@@ -29,6 +29,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "dashboard"))
 
 import plugin_api  # noqa: E402
+from conftest import TEST_SESSION_HEADER, TEST_SESSION_TOKEN  # noqa: E402
 
 API = "/api/plugins/skill-owner-routing"
 
@@ -91,7 +92,7 @@ def standard_fleet(tmp_path, monkeypatch):
 def std_client(standard_fleet):
     app = FastAPI()
     app.include_router(plugin_api.router, prefix=API)
-    with TestClient(app) as tc:
+    with TestClient(app, headers={TEST_SESSION_HEADER: TEST_SESSION_TOKEN}) as tc:
         yield tc
 
 
@@ -172,7 +173,7 @@ class TestNestedVisibility:
         monkeypatch.setattr(plugin_api, "_default_home", lambda: home)
         app = FastAPI()
         app.include_router(plugin_api.router, prefix=API)
-        with TestClient(app) as client:
+        with TestClient(app, headers={TEST_SESSION_HEADER: TEST_SESSION_TOKEN}) as client:
             body = client.get(f"{API}/map").json()
         names = {r["name"] for r in body["rows"]}
         assert "deep-skill" in names
@@ -191,7 +192,7 @@ class TestNestedVisibility:
         monkeypatch.setattr(plugin_api, "_default_home", lambda: home)
         app = FastAPI()
         app.include_router(plugin_api.router, prefix=API)
-        with TestClient(app) as client:
+        with TestClient(app, headers={TEST_SESSION_HEADER: TEST_SESSION_TOKEN}) as client:
             body = client.get(f"{API}/map").json()
         names = [r["name"] for r in body["rows"]]
         assert names.count("shared-prim") == 1, f"alias double-counted: {body['rows']}"
@@ -303,7 +304,7 @@ class TestEngineAuthoritative:
         monkeypatch.setattr(plugin_api, "_default_home", lambda: home)
         app = FastAPI()
         app.include_router(plugin_api.router, prefix=API)
-        with TestClient(app) as client:
+        with TestClient(app, headers={TEST_SESSION_HEADER: TEST_SESSION_TOKEN}) as client:
             body = client.get(f"{API}/map").json()
         assert body["meta"]["profiles"] == []
         assert {r["name"] for r in body["rows"]} == {"plain"}
@@ -319,7 +320,7 @@ class TestLegacyGlobStillCoversTopLevel:
         monkeypatch.setattr(plugin_api, "_default_home", lambda: home)
         app = FastAPI()
         app.include_router(plugin_api.router, prefix=API)
-        with TestClient(app) as client:
+        with TestClient(app, headers={TEST_SESSION_HEADER: TEST_SESSION_TOKEN}) as client:
             body = client.get(f"{API}/map").json()
         by_name = {r["name"]: r for r in body["rows"]}
         assert set(by_name) == {"plain-global", "trt-owned"}

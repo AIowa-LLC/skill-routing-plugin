@@ -1,0 +1,5 @@
+# i11 (SECURITY-CONTRACT §Dependencies): supplementary pin file — the
+# authoritative declaration lives in pyproject.toml [project.dependencies].
+PyYAML>=6.0.1,<7
+fastapi>=0.104.0,<1
+pydantic>=2.5,<3
