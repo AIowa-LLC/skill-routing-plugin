@@ -36,11 +36,18 @@ def scan_result(fleet):
     engine()
     from skill_owner_routing import drift
 
+    saved = os.environ.get("HERMES_HOME")
     os.environ["HERMES_HOME"] = str(fleet)
-    from skill_owner_routing import common
+    try:
+        from skill_owner_routing import common
 
-    common.reset_caches()
-    return drift.scan()
+        common.reset_caches()
+        return drift.scan()
+    finally:
+        if saved is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = saved
 
 
 def kinds(findings, skill=None):
@@ -57,10 +64,23 @@ def one_finding(findings, skill):
 
 @pytest.fixture()
 def fleet_b(tmp_path):
+    saved = os.environ.get("HERMES_HOME")
     root = make_fleet(tmp_path)
     # default home config: enabled (not strictly required for scan, but realistic)
     (root / "config.yaml").write_text("skills:\n  owner_routing:\n    enabled: true\n")
-    return root
+    try:
+        from skill_owner_routing import common
+
+        common.reset_caches()
+        yield root
+    finally:
+        from skill_owner_routing import common
+
+        common.reset_caches()
+        if saved is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = saved
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +338,7 @@ def test_B4b_audit_run_rest_contract(fleet_b, monkeypatch, tmp_path):
     app.include_router(router, prefix="/api/plugins/skill-owner-routing")
     client = TestClient(app)
 
-    os.environ["HERMES_HOME"] = str(fleet_b)
+    monkeypatch.setenv("HERMES_HOME", str(fleet_b))
 
     r1 = client.post("/api/plugins/skill-owner-routing/audit/run")
     assert r1.status_code == 202, f"audit run must 202, got {r1.status_code}: {r1.text[:200]}"

@@ -96,6 +96,8 @@ const translationTable = {
     'empty.map.desc': 'The audit scan populates this once installed.',
     'empty.filter.title': 'No matching skills',
     'empty.filter.desc': 'Adjust the search or the profile filter.',
+    'empty.drift.title': 'No drift findings',
+    'empty.drift.desc': 'The watchdog records drift findings here after the next audit scan.',
     'error.title': 'Could not load skill ownership data',
     'error.retry': 'Retry',
     'drift.open': 'Open',
@@ -129,7 +131,6 @@ const translationTable = {
     'audit.failed': 'Skill Ownership audit failed',
     'audit.findings': 'finding(s)',
     'status.tooltip': 'Skill ownership drift',
-    'statusbar.none': 'No open drift findings',
     'palette.open': 'Skill Ownership: Open map',
     'palette.audit': 'Skill Ownership: Run audit now',
     'palette.policy': 'Skill Ownership: Toggle policy'
@@ -806,8 +807,8 @@ function DriftFeed() {
             })
           }),
           drift.data && findings.length === 0 && jsx(EmptyState, {
-            title: 'No drift findings',
-            description: 'The watchdog records drift findings here after the next audit scan.'
+            title: t('empty.drift.title'),
+            description: t('empty.drift.desc')
           }),
           drift.data && findings.length > 0 && jsx('ul', {
             className: 'flex flex-col gap-2 p-3',

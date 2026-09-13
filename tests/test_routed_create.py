@@ -28,10 +28,15 @@ class TestRoutedCreate:
         assert not fleet_skill_path("default", "routed-skill").exists()
         trt_usage = enabled_config["trt"] / "skills" / ".usage.json"
         default_usage = enabled_config["root"] / "skills" / ".usage.json"
-        if trt_usage.exists():
-            assert "routed-skill" in trt_usage.read_text(encoding="utf-8")
-        if default_usage.exists():
-            assert "routed-skill" not in default_usage.read_text(encoding="utf-8")
+        # A1/A9b: the usage ledger is part of the routed transaction — the
+        # create is scoped to the owner home, so the record MUST exist there
+        # and MUST NOT exist in the caller's home. Unconditional: a missing
+        # precondition here is a routing bug, not a pass.
+        assert trt_usage.is_file(), f"usage ledger missing from owner home: {trt_usage}"
+        assert "routed-skill" in trt_usage.read_text(encoding="utf-8")
+        assert not default_usage.exists(), (
+            f"usage ledger leaked into the default home: {default_usage}"
+        )
 
     def test_owner_equals_active_creates_locally(self, enabled_config, monkeypatch):
         set_active_profile(monkeypatch, enabled_config, "trt")

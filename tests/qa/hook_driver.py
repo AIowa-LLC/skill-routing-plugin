@@ -215,11 +215,13 @@ def call_scan(scan_fn: Callable, fleet_root: Path) -> List[Dict[str, Any]]:
 
     Tolerant to either (root) or () signatures; sets HERMES_HOME to the
     fleet root first so profile-relative discovery resolves inside the
-    temp fleet.
+    temp fleet. Restores the prior value so callers never inherit the
+    temp fleet (order-independence under pytest-randomly).
     """
     import inspect
     import os
 
+    saved = os.environ.get("HERMES_HOME")
     os.environ["HERMES_HOME"] = str(fleet_root)
     try:
         try:
@@ -227,7 +229,10 @@ def call_scan(scan_fn: Callable, fleet_root: Path) -> List[Dict[str, Any]]:
         except TypeError:
             return normalize_findings(scan_fn())
     finally:
-        pass
+        if saved is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = saved
 
 
 def snapshot_tree_of(root) -> dict:

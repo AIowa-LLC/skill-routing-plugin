@@ -160,6 +160,17 @@ const flatKeys = Object.keys(m.translationTable.en)
 const nestedOk = flatKeys.every(key => typeof resolvePath(bundles.en, key) === 'string')
 check(nestedOk, 'every flat key resolves through the nested tree', 'flat registration would return undefined leaves')
 check(flatKeys.some(k => k.includes('.')), 'flat authoring table uses dot-keys')
+// m8: DriftFeed empty state must be i18n-keyed, and the dead statusbar key
+// stays dead (source check is comment-stripped so it cannot be masked).
+check(
+  flatKeys.includes('empty.drift.title') && flatKeys.includes('empty.drift.desc'),
+  'DriftFeed empty state uses empty.drift.* keys'
+)
+check(
+  /\bt\('empty\.drift\.title'\)/.test(noComments) && /\bt\('empty\.drift\.desc'\)/.test(noComments),
+  'DriftFeed empty state renders through t()'
+)
+check(!('statusbar.none' in m.translationTable.en), 'dead statusbar.none key stays removed')
 
 console.log('\n== registration surface (V1-V5) ==')
 const areas = []
