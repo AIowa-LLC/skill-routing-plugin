@@ -3,8 +3,8 @@
 A [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin that keeps
 fleet skills where they belong. If you run multiple Hermes profiles, it enforces
 per-profile skill **ownership**: skills are created in the profile that owns the
-capability, never edited "sideways" from the wrong profile, and continuously
-audited for ownership drift.
+capability, never edited "sideways" from the wrong profile, and audited for
+ownership drift on demand.
 
 It ships as one unified plugin package — an enforcement engine (Python), a REST
 + WebSocket dashboard API, and an opt-in desktop-app UI — that installs and
@@ -12,10 +12,10 @@ uninstalls as a single folder.
 
 - **Enforcement gate** — a `pre_tool_call` hook intercepts every
   `skill_manage` call (create, edit, patch, delete, write_file, remove_file,
-  archive). Creates that declare an `owner_profile` are routed into the owner's
- home; mutations of a skill from the wrong profile are blocked with guidance on
-  doing it correctly. The gate fails closed: a malfunction blocks the call and
-  says so, distinctly from a policy denial.
+  archive). Creates that declare an `owner_profile` are routed into the
+  owner's home; mutations of a skill from the wrong profile are blocked with
+  guidance on doing it correctly. The gate fails closed: a malfunction blocks
+  the call and says so, distinctly from a policy denial.
 - **Ownership-drift audit** — an on-demand scanner over every profile's
   `skills/` tree plus the global home, reporting five finding kinds:
   `drifted`, `misplaced-global`, `unknown-owner`, `duplicate/hoarding`,
