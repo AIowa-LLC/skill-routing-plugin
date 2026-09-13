@@ -58,10 +58,10 @@ captured at run time — never retroactively.
 > fetchable). Preserved verbatim as history — do not re-baseline against them.
 > The certification baseline is re-pinned as of Run 5 (2026-09-13).
 
-- **Candidate**: /home/tony/projects/skill-routing-plugin @ `9d3b498` (engine) with uncommitted BUILD-2 dashboard (`e708d06` landed during the run; tests ran against the committed engine + as-found untracked dashboard)
-- **Core**: /home/tony/.hermes/hermes-agent @ `057dcdf236` (runtime venv python 3.11.15)
+- **Candidate**: ~/projects/skill-routing-plugin @ `9d3b498` (engine) with uncommitted BUILD-2 dashboard (`e708d06` landed during the run; tests ran against the committed engine + as-found untracked dashboard)
+- **Core**: ~/.hermes/hermes-agent @ `057dcdf236` (runtime venv python 3.11.15)
 - **OS**: Linux 7.1.3-arch2-2 (Arch)
-- **Command**: `/home/tony/.hermes/hermes-agent/venv/bin/python -m pytest tests/ -q` (dev suites) + `tests/qa/` (QA harness)
+- **Command**: `~/.hermes/hermes-agent/venv/bin/python -m pytest tests/ -q` (dev suites) + `tests/qa/` (QA harness)
 
 ### Gate A results
 
@@ -122,8 +122,8 @@ Fixture layout, real active-profile inference, config-writer knob matrix (incl. 
 ### Reproduction
 
 ```
-cd /home/tony/projects/skill-routing-plugin
-/home/tony/.hermes/hermes-agent/venv/bin/python -m pytest tests/qa/ -q
+cd ~/projects/skill-routing-plugin
+~/.hermes/hermes-agent/venv/bin/python -m pytest tests/qa/ -q
 ```
 
 ---
@@ -290,22 +290,22 @@ only, zero source changes.
 
 ### Candidate identity (all captured at run time)
 
-- **Plugin**: /home/tony/projects/skill-routing-plugin @ `f989767`
+- **Plugin**: ~/projects/skill-routing-plugin @ `f989767`
   (= origin/master, verified equal; clean worktree on branch
   `wt/p3-matrix-run5`; dirty files: 0 — the only edits this run are this
   matrix entry + one README pointer line)
-- **Core (RE-PINNED)**: /home/tony/.hermes/hermes-agent @
+- **Core (RE-PINNED)**: ~/.hermes/hermes-agent @
   `3e09e5a15f` (full sha `3e09e5a15f43e7253abaf4760f0487fece39ff93`,
   "fmt(js): `npm run fix` on merge (#109094)", 2026-09-12 13:20:20 +0000),
   version **v0.21.2** (pyproject). Shallow clone (`--is-shallow-repository`
   = true) — see caveat below.
 - **Import proven by probe**: `tools.skill_manager_tool` resolves from
-  `/home/tony/.hermes/hermes-agent/tools/skill_manager_tool.py` via the
+  `~/.hermes/hermes-agent/tools/skill_manager_tool.py` via the
   editable install `__editable__.hermes_agent-0.21.2.pth` in the runtime
   venv — the suite tested the live checkout, not a stale copy.
 - **Environment**: Linux 7.2.3-arch1-3, Python 3.11.16, pytest 9.1.1,
   Node v26.7.0 (desktop contract), venv
-  `/home/tony/.hermes/hermes-agent/venv`.
+  `~/.hermes/hermes-agent/venv`.
 
 ### Suite evidence — green twice, exact counts
 
@@ -357,7 +357,7 @@ merge (board `skill-ownership-plugin`):
 
 ```
 cd <repo> @ f989767
-/home/tony/.hermes/hermes-agent/venv/bin/python -m pytest tests/ -q   # 205 passed
+~/.hermes/hermes-agent/venv/bin/python -m pytest tests/ -q   # 205 passed
 node tests/desktop-plugin-contract.mjs                                 # ALL PASS
 bash qa/run_gates.sh                                                  # fingerprinted: core 3e09e5a15f, plugin f989767
 ```
