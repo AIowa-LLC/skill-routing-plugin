@@ -4,6 +4,9 @@ Results are APPENDED per run. Each run pins candidate identity (repo, commit,
 dirty state, environment) per SPEC-3. Verdicts: PASS / FAIL / NOT_TESTED.
 Row maps: `tests/qa/test_gate_a.py::test_<row>` and `tests/qa/test_gate_b.py::test_<row>`.
 
+Pin policy: every run pins the core commit it actually ran against,
+captured at run time — never retroactively.
+
 ## Gate A — enforcement semantics
 
 | # | Scenario | Expected | Test |
@@ -46,6 +49,14 @@ Row maps: `tests/qa/test_gate_a.py::test_<row>` and `tests/qa/test_gate_b.py::te
 ---
 
 ## Run 1 — 2026-08-24 (BUILD-4 harness delivery)
+
+> **HISTORICAL (unresolvable pins)** — Runs 1-4 pinned cores `057dcdf236` /
+> `809e94ca4c`, which the live checkout can no longer reproduce: the core repo
+> is a shallow clone since the Aug campaign and neither pin is reachable from
+> live HEAD (`057dcdf236` survives only as a disconnected object under tag
+> `v2026.8.27~640`; `809e94ca4c` is absent entirely; PR #87101's tree is not
+> fetchable). Preserved verbatim as history — do not re-baseline against them.
+> The certification baseline is re-pinned as of Run 5 (2026-09-13).
 
 - **Candidate**: /home/tony/projects/skill-routing-plugin @ `9d3b498` (engine) with uncommitted BUILD-2 dashboard (`e708d06` landed during the run; tests ran against the committed engine + as-found untracked dashboard)
 - **Core**: /home/tony/.hermes/hermes-agent @ `057dcdf236` (runtime venv python 3.11.15)
@@ -268,3 +279,100 @@ Commands + results (venv Python 3.11.15, Linux 7.1.3-arch2-2):
 **VERDICT: PASS (QA-L2)** — BUILD-4 Gate A/B accepted vs pinned core
 `057dcdf236`; F1/F2/F3 fixed; F5 ruled (not a candidate defect). Gate C/D
 remain release-gate scope per Run 1 notes.
+
+---
+
+## Run 5 — 2026-09-13 02:2x CDT (core re-pin + full-state certification; t_f074234c)
+
+Fixes audit findings m14 (stale matrix) / i2 (unreproducible pins) / B4
+(undefined certification baseline). QA-owned run; matrix + README pointer
+only, zero source changes.
+
+### Candidate identity (all captured at run time)
+
+- **Plugin**: /home/tony/projects/skill-routing-plugin @ `f989767`
+  (= origin/master, verified equal; clean worktree on branch
+  `wt/p3-matrix-run5`; dirty files: 0 — the only edits this run are this
+  matrix entry + one README pointer line)
+- **Core (RE-PINNED)**: /home/tony/.hermes/hermes-agent @
+  `3e09e5a15f` (full sha `3e09e5a15f43e7253abaf4760f0487fece39ff93`,
+  "fmt(js): `npm run fix` on merge (#109094)", 2026-09-12 13:20:20 +0000),
+  version **v0.21.2** (pyproject). Shallow clone (`--is-shallow-repository`
+  = true) — see caveat below.
+- **Import proven by probe**: `tools.skill_manager_tool` resolves from
+  `/home/tony/.hermes/hermes-agent/tools/skill_manager_tool.py` via the
+  editable install `__editable__.hermes_agent-0.21.2.pth` in the runtime
+  venv — the suite tested the live checkout, not a stale copy.
+- **Environment**: Linux 7.2.3-arch1-3, Python 3.11.16, pytest 9.1.1,
+  Node v26.7.0 (desktop contract), venv
+  `/home/tony/.hermes/hermes-agent/venv`.
+
+### Suite evidence — green twice, exact counts
+
+| Command | Run 1 | Run 2 |
+|---|---|---|
+| `venv/bin/python -m pytest tests/ -q` | 205 passed, 0 failed, 0 xfailed (2.30s) | 205 passed, 0 failed, 0 xfailed (2.21s) via `bash qa/run_gates.sh` |
+| `node tests/desktop-plugin-contract.mjs` | ALL PASS (36 ok / 0 FAIL, exit 0) | ALL PASS (36 ok / 0 FAIL, exit 0) |
+
+- Bare-HOME parity run (`HOME=/tmp/... venv/bin/python -m pytest tests/ -q`):
+  **205 passed** — no HOME-dependent tests; the green is not a dev-box artifact.
+- QA-harness breakdown: `tests/qa/` 55 passed — Gate A 32/32, Gate B 12/12,
+  harness self-check 11/11 (unchanged from Run 4's totals).
+- The single warning (`Unknown config option: timeout`) is the known inert
+  `pytest.ini` timeout option (audit m13) — pre-existing, out of P3 scope.
+
+### Core posture at this pin (grounds the Gate A verdict)
+
+The re-pinned core is **pre-#87101**: `tools/skill_manager_tool` at
+`3e09e5a15f` lacks `_skill_owner_routing_policy` (import probe returned no
+owner/routing symbols; `config_defaults.py` grep for `owner_routing` = 0
+hits). The plugin create gate is therefore ACTIVE, not dormant — the same
+certification posture as Runs 1-4 (coexistence.py `core_symbol_present()`
+= False → gate enforces). Runs 3/4's live-core D5 dormancy caveats do not
+apply to this pin.
+
+### Post-audit coverage (audit t_1b603256, MASTER-REPORT.md)
+
+Run 5 certifies master @ f989767 which already contains the three
+post-audit lanes, each independently QA-verified on its own branch before
+merge (board `skill-ownership-plugin`):
+
+- **8fde8bc** — P2 drift regression pins (001eb34 justification-honoring,
+  d4effac alias-skip, M5 id-collision strict xfail) — QA PASS (QA-L2) on
+  card **t_6c71a179** (175+1x green ×2, mutations failing-then-green,
+  scope tests-only)
+- **d93d696** — P4 dashboard /map engine-authoritative enumeration (M1
+  phantom twins, m1 nested skills) — QA PASS (QA-L2) on card **t_a82aa627**
+  (192+1x green ×2 vs baseline 175+1x; scope dashboard+tests only)
+- **ed2cba0** — P5 trust-path hardening (M4/M5/M6/M8/M10: watchdog
+  crash-guard, id path digest, resolve fail-closed, desktop timeout UX,
+  gate fail-closed) — QA PASS (QA-L2, M6/M10 probed to L3) on card
+  **t_e280e62e** (188 passed 0 xfail ×2 — M5 collision fixed, pin un-xfailed;
+  verified in throwaway worktrees, branch+master bit-identical pre/post)
+- **Merge commits ea3fb8d / f989767** (P4+P5 integration, t_c6eb09c6):
+  zero conflicts, suite green after each merge; count arithmetic
+  175+1x → 192+1x → 205/0x traceable per-lane (+17 map tests incl. un-xfail, +13 trust-path tests).
+
+### Reproduction
+
+```
+cd <repo> @ f989767
+/home/tony/.hermes/hermes-agent/venv/bin/python -m pytest tests/ -q   # 205 passed
+node tests/desktop-plugin-contract.mjs                                 # ALL PASS
+bash qa/run_gates.sh                                                  # fingerprinted: core 3e09e5a15f, plugin f989767
+```
+
+### Residual risk / not covered
+
+- The desktop contract runs on a stub SDK — real desktop-app rendering is
+  Gate C scope, untested this run.
+- Gate D (release readiness / D5 live-core dormancy probes) not exercised
+  this run; the live core is pre-#87101 so D5-for-real remains unreachable
+  until an enforcing core is installed.
+- Suite is per-machine (repo has no CI workflows — audit i-tier note);
+  bare-HOME parity run mitigates for this host.
+
+**VERDICT: PASS (QA-L2)** — master @ f989767 certified against re-pinned
+core v0.21.2 @ 3e09e5a15f: suite 205 passed + 0 xfail ×2, desktop contract
+ALL PASS ×2, full post-audit lane coverage with per-lane QA verdicts.
+Certification baseline re-defined from this run forward.
