@@ -132,14 +132,10 @@ class TestCrossHomeSymlinkAliases:
 
 
 class TestFindingIdCollisionDefaultTwin:
-    """M5 (known bug, do NOT fix): a REAL profiles/default/skills directory
-    mirroring a global skill produces two distinct findings (one per physical
-    copy) that currently share one id."""
+    """M5 (fixed in P5): a REAL profiles/default/skills directory mirroring a
+    global skill produces two distinct findings (one per physical copy) —
+    they must carry DISTINCT ids (digest includes the resolved path)."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="M5: id digest lacks path discriminator — see MASTER-REPORT t_79481b53",
-    )
     def test_distinct_twin_findings_have_distinct_ids(self, fleet):
         default_profile = fleet["root"] / "profiles" / "default"
         default_profile.mkdir(parents=True)

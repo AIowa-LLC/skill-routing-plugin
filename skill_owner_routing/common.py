@@ -48,11 +48,23 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def new_finding_id(kind: str, skill: str, scope: str) -> str:
-    """Stable deterministic finding id: same drift ⇒ same id across rescans."""
+def new_finding_id(kind: str, skill: str, scope: str, path: str = "") -> str:
+    """Stable deterministic finding id: same drift ⇒ same id across rescans.
+
+    The digest includes the skill's RESOLVED path so two distinct physical
+    copies of the same skill name (twin findings) get distinct ids — while
+    symlink aliases of one physical file resolve to the same path and
+    therefore keep sharing one id.
+    """
     import hashlib
 
+    resolved = ""
+    if path:
+        try:
+            resolved = str(Path(path).resolve())
+        except OSError:
+            resolved = str(path)
     digest = hashlib.sha256(
-        f"{kind}|{scope}|{skill}".encode("utf-8")
+        f"{kind}|{scope}|{skill}|{resolved}".encode("utf-8")
     ).hexdigest()[:12]
     return f"{kind}-{digest}"

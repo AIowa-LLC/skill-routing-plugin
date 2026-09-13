@@ -99,8 +99,11 @@ def _all_homes() -> List[Tuple[str, Path]]:
     except OSError:
         children = []
     for child in children[:_MAX_PROFILES]:
-        if not child.is_dir():
-            continue
+        try:
+            if not child.is_dir():
+                continue
+        except OSError:
+            continue  # vanished/unstatable between listing and stat
         if default_skills_real is not None:
             try:
                 child_skills_real = (child / "skills").resolve()
@@ -113,7 +116,12 @@ def _all_homes() -> List[Tuple[str, Path]]:
 
 
 def _skills_in(home: Path) -> List[Tuple[str, Path]]:
-    """Top-level + one-category-nested skills, bounded per home."""
+    """Top-level + one-category-nested skills, bounded per home.
+
+    Permission/OSError on any single child (unreadable dir, broken stat) is
+    skipped, never propagated — one hostile directory must not kill the
+    whole watchdog scan (same contract as run_audit).
+    """
     skills_dir = home / "skills"
     found: List[Tuple[str, Path]] = []
     try:
@@ -123,27 +131,31 @@ def _skills_in(home: Path) -> List[Tuple[str, Path]]:
     for child in children:
         if len(found) >= _MAX_SKILLS_PER_HOME:
             break
-        if not child.is_dir() or child.name.startswith("."):
-            continue
-        if child.is_symlink() and not _resolves_within(child, home):
-            continue  # alias to another home's skill — counted there, not here
-        skill_md = child / "SKILL.md"
-        if skill_md.is_file():
-            found.append((child.name, skill_md))
-            continue
         try:
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            if child.is_symlink() and not _resolves_within(child, home):
+                continue  # alias to another home's skill — counted there, not here
+            skill_md = child / "SKILL.md"
+            if skill_md.is_file():
+                found.append((child.name, skill_md))
+                continue
             grandchildren = sorted(child.iterdir())
         except OSError:
-            continue
+            continue  # unreadable/undiscoverable — skip this child only
         for grandchild in grandchildren:
             if len(found) >= _MAX_SKILLS_PER_HOME:
                 break
-            if grandchild.is_dir():
+            try:
+                if not grandchild.is_dir():
+                    continue
                 if grandchild.is_symlink() and not _resolves_within(grandchild, home):
                     continue  # alias to another home's skill
                 nested = grandchild / "SKILL.md"
                 if nested.is_file():
                     found.append((grandchild.name, nested))
+            except OSError:
+                continue  # unreadable/undiscoverable — skip this grandchild only
     return found
 
 
@@ -195,6 +207,7 @@ def _analyze(
                     f"Skill {skill!r} declares owner_profile={owner!r}, which "
                     "is not a registered profile. Re-assign the owner or "
                     "remove the stale metadata.",
+                    entry["path"],
                 )
             )
         if owner is not None and scope != "default" and owner != scope:
@@ -208,6 +221,7 @@ def _analyze(
                     f"Skill {skill!r} lives in profile {scope!r} but declares "
                     f"owner_profile={owner!r}. Move it to {owner!r}'s skills "
                     f"directory or update the metadata to {scope!r}.",
+                    entry["path"],
                 )
             )
         if scope == "default" and owner is not None:
@@ -223,11 +237,12 @@ def _analyze(
                         f"Global skill {skill!r} carries owner_profile={owner!r}. "
                         "Either strip the owner metadata (with a global "
                         "justification) or move the skill into the owner profile.",
+                        entry["path"],
                     )
                 )
         if scope == "default" and owner is None:
             hoarding = lint_global_skill(
-                skill, entry["frontmatter"], entry["body"]
+                skill, entry["frontmatter"], entry["body"], entry["path"]
             )
             if hoarding is not None:
                 findings.append(hoarding)
@@ -258,9 +273,10 @@ def _finding(
     expected_owner: Optional[str],
     actual: str,
     proposed_fix: str,
+    path: str = "",
 ) -> Dict[str, Any]:
     return {
-        "id": new_finding_id(kind, skill, actual),
+        "id": new_finding_id(kind, skill, actual, path),
         "kind": kind,
         "severity": severity,
         "skill": skill,

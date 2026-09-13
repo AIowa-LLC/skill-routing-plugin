@@ -902,12 +902,29 @@ def post_resolve(finding_id: str) -> Dict[str, Any]:
             try:
                 with _home_override(home):
                     updated = engine["ledger"].update_status(finding_id, "resolved")
-            except Exception:
-                updated = None
+            except Exception as exc:
+                # The ledger write failed — report it, never fake a success.
+                # Only the exception CLASS is surfaced, never internals.
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"Resolve failed: drift ledger write did not complete "
+                        f"({type(exc).__name__}). The finding remains open; "
+                        f"no resolution was recorded."
+                    ),
+                )
             if isinstance(updated, dict):
                 finding = _canonical_finding(updated)
                 if finding["status"] == "resolved" and not finding.get("resolved_at"):
                     finding["resolved_at"] = _now_ms()
+            else:
+                # Ledger no longer knows this id (e.g. re-scan dropped it):
+                # nothing was written — treat as not-found rather than
+                # recording a false resolution.
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Drift finding {finding_id!r} not found.",
+                )
         else:
             finding["status"] = "resolved"
             finding["resolved_at"] = _now_ms()

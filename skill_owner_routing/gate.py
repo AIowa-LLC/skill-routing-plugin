@@ -30,9 +30,18 @@ def pre_tool_call(**kwargs: Any) -> Optional[Dict[str, str]]:
         return None
     try:
         return _decide(kwargs)
-    except Exception:
-        logger.exception("skill-owner-routing gate error (fail-open)")
-        return None
+    except Exception as exc:
+        # FAIL-CLOSED (2026-09-12 ruling): an unexpected gate error on a
+        # skill_manage call must block the mutation, never silently allow it.
+        # The message is deliberately distinct from a policy violation.
+        logger.exception("skill-owner-routing gate error (fail-closed)")
+        return _block(
+            f"skill-owner-routing gate error (fail-closed): the routing gate "
+            f"could not evaluate this skill_manage call "
+            f"({type(exc).__name__}) and blocked it to be safe. This is a "
+            f"gate malfunction, not a policy violation. Please retry the "
+            f"call; if it fails again, report this with the log traceback."
+        )
 
 
 def _decide(kwargs: Dict[str, Any]) -> Optional[Dict[str, str]]:
