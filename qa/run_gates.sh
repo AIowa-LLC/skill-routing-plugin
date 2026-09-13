@@ -11,7 +11,22 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV_PY="${HERMES_VENV_PY:-/home/tony/.hermes/hermes-agent/venv/bin/python}"
+# Interpreter discovery — the QA gates run on the RUNTIME venv (the python
+# that imports hermes core). Resolution order:
+#   1. $HERMES_VENV_PY (explicit override)
+#   2. $SORE_CORE_ROOT/venv/bin/python (pinned core checkout)
+#   3. ~/.hermes/hermes-agent/venv/bin/python (default install location)
+VENV_PY="${HERMES_VENV_PY:-}"
+if [ -z "$VENV_PY" ]; then
+    CORE_DIR="${SORE_CORE_ROOT:-$HOME/.hermes/hermes-agent}"
+    if [ -x "${CORE_DIR}/venv/bin/python" ]; then
+        VENV_PY="${CORE_DIR}/venv/bin/python"
+    fi
+fi
+if [ -z "$VENV_PY" ]; then
+    echo "FAIL  no runtime venv found — set HERMES_VENV_PY or SORE_CORE_ROOT to the hermes core checkout (fail-closed)" >&2
+    exit 1
+fi
 TARGETS="${*:-tests/}"
 
 cd "$REPO"

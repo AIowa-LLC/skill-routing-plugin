@@ -1,0 +1,63 @@
+# CI — skill-owner-routing
+#
+# Runs the full pytest suite against a PINNED hermes-agent core checkout
+# (SORE_CORE_ROOT), plus the desktop plugin contract test. The pin below
+# matches the SPEC-3 Run-5 certification core (v0.21.2); bump it
+# deliberately, the same way qa/matrix.md run records re-pin.
+#
+# Fail-closed posture: if the core fetch or engine import fails, the job
+# fails — a green run never silently skips coverage.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  SORE_CORE_ROOT: ${{ github.workspace }}/hermes-core
+  HERMES_CORE_PIN: 3e09e5a15f43e7253abaf4760f0487fece39ff93  # v0.21.2 (Run-5 pin)
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest fastapi httpx pydantic pyyaml
+
+      - name: Fetch pinned hermes core
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/NousResearch/hermes-agent.git hermes-core
+          git -C hermes-core fetch --depth=1 origin "$HERMES_CORE_PIN"
+          git -C hermes-core checkout --detach FETCH_HEAD
+          test -f hermes-core/hermes_constants.py
+
+      - name: Report environment pin
+        run: |
+          echo "core:  $(git -C hermes-core rev-parse --short HEAD)"
+          echo "plugin: $(git rev-parse --short HEAD)"
+          python --version
+
+      - name: Run suite (dev + QA harness)
+        run: python -m pytest tests/ -q --tb=short
+
+  desktop-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Desktop plugin contract test
+        run: node tests/desktop-plugin-contract.mjs

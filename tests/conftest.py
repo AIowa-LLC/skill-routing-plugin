@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-CORE_ROOT = Path(os.environ.get("SORE_CORE_ROOT", "/home/tony/.hermes/hermes-agent"))
+CORE_ROOT = Path(os.environ.get("SORE_CORE_ROOT") or Path.home() / ".hermes" / "hermes-agent")
 
 # Core modules (hermes_constants, hermes_cli.*, tools.*, agent.*, utils)
 # live in the Hermes checkout; the plugin imports them lazily.
