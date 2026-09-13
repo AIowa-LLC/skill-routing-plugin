@@ -402,10 +402,29 @@ def test_no_secrets_in_payloads(client, fleet):
 
 
 def test_engine_absent_graceful(client, monkeypatch):
-    """Contract: dashboard runs scan-fallback when BUILD-1 package is missing."""
-    monkeypatch.setattr(plugin_api, "_ENGINE_CACHE", [None, False])  # simulate absent engine
+    """Contract: dashboard runs scan-fallback when BUILD-1 package is missing.
+
+    Genuine absence (T4): the engine modules are evicted and the loader's own
+    import channel is blocked, so _load_engine() really returns None — no
+    cache-reset rebound back into a working import.
+    """
+    for mod in [m for m in list(sys.modules) if m == "skill_owner_routing" or m.startswith("skill_owner_routing.")]:
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+    real_import = plugin_api.importlib.import_module
+
+    def blocked(name, *args, **kwargs):
+        if name.startswith("skill_owner_routing"):
+            raise ImportError(f"engine import blocked for test: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(plugin_api.importlib, "import_module", blocked)
+    monkeypatch.setattr(plugin_api, "_ENGINE_CACHE", [None, False])
+    assert plugin_api._load_engine() is None, "absence was not simulated — engine still loads"
     body = client.get(f"{API}/map").json()
     assert body["rows"]
+    drift = client.get(f"{API}/drift").json()
+    assert drift["findings"], "scan-fallback must populate the Drift Feed (M7)"
+    assert drift["meta"]["open_count"] == sum(1 for f in drift["findings"] if f["status"] == "open")
     # engine present again for the rest of the suite
     monkeypatch.undo()
     engine = plugin_api._load_engine()

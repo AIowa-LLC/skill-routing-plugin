@@ -895,27 +895,42 @@ def _rows_from(copies: Dict[str, List[Dict[str, Any]]], profiles: List[str]) -> 
                 findings.append(_finding(KIND_DUPLICATE, "warning", name, owners[0] if owners else None,
                                          "default+" + "+".join(sorted(c["profile"] or "default" for c in copies[name])),
                                          "Keep the profile-owned copy; delete the global duplicate "
-                                         "(No-Specialist-Hoarding)."))
+                                         "(No-Specialist-Hoarding).",
+                                         path=copy["path"]))
             elif state == "unknown-owner":
                 findings.append(_finding("unknown-owner", "warning", name, owner, scope,
                                          f"owner_profile {owner!r} is not a registered profile; "
-                                         "re-assign the owner or remove the stale metadata."))
+                                         "re-assign the owner or remove the stale metadata.",
+                                         path=copy["path"]))
             elif owner and scope == "global":
                 findings.append(_finding("misplaced-global", "warning", name, owner, "default",
                                          f"Move the skill to the {owner} profile home, or strip the "
-                                         "owner metadata with a global justification."))
+                                         "owner metadata with a global justification.",
+                                         path=copy["path"]))
             elif owner and scope == "profile" and owner != profile:
                 findings.append(_finding("drifted", "critical", name, owner, profile or scope,
-                                         f"Move to {owner}, archive the {profile} copy."))
+                                         f"Move to {owner}, archive the {profile} copy.",
+                                         path=copy["path"]))
             elif state == "unowned":
                 findings.append(_finding("unowned", "info", name, None, "default",
                                          "Declare metadata.hermes.owner_profile, or justify global "
-                                         "placement via metadata.hermes.global_justification."))
+                                         "placement via metadata.hermes.global_justification.",
+                                         path=copy["path"]))
     return {"profiles": profiles, "rows": rows, "findings": sorted(findings, key=lambda f: (f["skill"], f["kind"]))}
 
 
-def _finding(kind: str, severity: str, skill: str, expected: Optional[str], actual: str, fix: str) -> Dict[str, Any]:
-    sig = hashlib.sha256(f"{kind}|{actual}|{skill}".encode()).hexdigest()[:12]
+def _finding(kind: str, severity: str, skill: str, expected: Optional[str], actual: str, fix: str,
+             path: str = "") -> Dict[str, Any]:
+    """Fallback finding — id digest mirrors engine common.new_finding_id
+    (kind|scope|skill|resolved-path) so two physical copies of one skill
+    name get distinct ids while symlink aliases of a single file share one."""
+    resolved = ""
+    if path:
+        try:
+            resolved = str(Path(path).resolve())
+        except OSError:
+            resolved = str(path)
+    sig = hashlib.sha256(f"{kind}|{actual}|{skill}|{resolved}".encode("utf-8")).hexdigest()[:12]
     return {
         "id": f"{kind}-{sig}",
         "kind": kind,
@@ -988,6 +1003,10 @@ def _ensure_scan(state: Dict[str, Any], home: Path) -> None:
         engine = _load_engine()
         if engine is not None and _engine_findings(home) is None:
             _engine_call(engine, "scan", home, submodule="drift")
+        elif engine is None and "findings" not in state:
+            # M7 backfill: rows present but the fallback feed was never
+            # seeded (pre-fix state.json) — populate it via our own scan.
+            _merge_fallback_findings(state, _scan_fleet(home)["findings"])
         return
     _merge_scan(state, _scan_fleet(home), audit=False)
 
@@ -1002,7 +1021,35 @@ def _merge_scan(state: Dict[str, Any], scan: Dict[str, Any], audit: bool) -> int
     state["last_scan_ts"] = stamp
     if audit:
         state["last_audit_ts"] = stamp
+    if "findings" in scan and _load_engine() is None:
+        # Fallback mode owns its findings in state.json; when the engine is
+        # importable its own ledger stays the single findings surface.
+        return _merge_fallback_findings(state, scan["findings"])
     return sum(1 for f in scan["findings"] if f.get("status") == "open")
+
+
+def _merge_fallback_findings(state: Dict[str, Any], findings: List[Dict[str, Any]]) -> int:
+    """Fallback findings upsert — engine ledger.upsert_findings parity.
+
+    Deterministic ids keep resolved/acknowledged status across rescans;
+    drift that no longer appears is dropped (the drift is gone). Returns
+    the open count, mirroring the engine ledger's counts.open."""
+    stamp = _now_ms()
+    prior = {f["id"]: f for f in state.get("findings", []) if isinstance(f, dict) and f.get("id")}
+    merged: Dict[str, Any] = {}
+    for finding in findings:
+        if not finding.get("discovered_at"):
+            finding["discovered_at"] = stamp
+        kept = prior.get(finding["id"])
+        if kept is not None and kept.get("status") in {"resolved", "acknowledged"}:
+            revived = {**finding, "status": kept["status"]}
+            if kept.get("resolved_at"):
+                revived["resolved_at"] = kept["resolved_at"]
+            merged[finding["id"]] = revived
+        else:
+            merged[finding["id"]] = finding
+    state["findings"] = sorted(merged.values(), key=lambda f: (f.get("kind", ""), f.get("skill", "")))
+    return sum(1 for f in state["findings"] if f.get("status") == "open")
 
 
 def _live_findings(state: Dict[str, Any], home: Path) -> List[Dict[str, Any]]:
@@ -1011,6 +1058,22 @@ def _live_findings(state: Dict[str, Any], home: Path) -> List[Dict[str, Any]]:
     if findings is not None:
         return findings
     return state.get("findings", [])
+
+
+def _ensure_fallback_feed(state: Dict[str, Any], home: Path) -> bool:
+    """Fallback-mode Drift Feed seeding: never serve an empty feed while the
+    dashboard's own enumeration sees drift. Covers cold start (no /map yet)
+    and pre-fix state.json (rows present, findings key never written).
+    Returns True when state was mutated (caller persists under its lock)."""
+    if _load_engine() is not None:
+        return False  # engine ledger is the feed — nothing to seed
+    if "findings" in state:
+        return False  # already seeded (empty list = clean fleet, not absent)
+    scan = _scan_fleet(home)
+    state.setdefault("rows", scan["rows"])
+    state.setdefault("profiles", scan["profiles"])
+    _merge_fallback_findings(state, scan["findings"])
+    return True
 
 
 def _last_audit_ts(state: Dict[str, Any], findings: List[Dict[str, Any]]) -> Optional[int]:
@@ -1052,6 +1115,11 @@ def _run_audit(home: Path, run_id: str) -> None:
             keep = sorted(runs.items(), key=lambda kv: kv[1].get("finished_at", 0), reverse=True)[:_RUN_HISTORY_CAP]
             state["runs"] = dict(keep)
         _merge_rows(state, scan if _append_audit_history is not None else {"rows": [], "profiles": []})
+        if _append_audit_history is not None and _load_engine() is None:
+            # M7: fallback audits refresh the Drift Feed; findings_count
+            # reports the MERGED feed (resolutions preserved), mirroring
+            # engine mode where the ledger's post-upsert open count is it.
+            record["findings_count"] = _merge_fallback_findings(state, scan.get("findings", []))
         _save_state(state, home)
     _broadcast("invalidate")
 
@@ -1459,6 +1527,8 @@ def get_drift() -> Dict[str, Any]:
     _ensure_ledger_populated(home)
     with _STATE_LOCK:
         state = _load_state(home)
+        if _ensure_fallback_feed(state, home):
+            _save_state(state, home)
     findings = _live_findings(state, home)
     meta = _drift_meta(findings)
     return {"findings": findings, "meta": {k: meta[k] for k in ("open_count", "counts_by_severity")}}
@@ -1470,6 +1540,8 @@ def get_drift_summary() -> Dict[str, Any]:
     _ensure_ledger_populated(home)
     with _STATE_LOCK:
         state = _load_state(home)
+        if _ensure_fallback_feed(state, home):
+            _save_state(state, home)
     meta = _drift_meta(_live_findings(state, home))
     return {"open_count": meta["open_count"], "worst_severity": meta["worst_severity"]}
 
