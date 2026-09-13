@@ -31,3 +31,6 @@ skill-owner-routing/
 │   └── ledger.py          #   findings ledger (DEFAULT home, atomic writes)
 └── tests/                 # pytest, temp HERMES_HOME
 ```
+
+QA evidence: `qa/matrix.md` — append-only run history with pinned core
+commits and verdicts (see pin policy there).
