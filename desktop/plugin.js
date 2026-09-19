@@ -48,7 +48,7 @@ import {
   useQuery,
   useValue
 } from '@hermes/plugin-sdk'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'skill-owner-routing'
@@ -469,11 +469,18 @@ function PolicyPanel() {
 // ---------------------------------------------------------------------------
 
 // Fixed-height windowed list: listens on the radix scroll viewport that
-// contains `ref`; spacer divs pad the unrendered range.
-function useViewportScroll(ref) {
+// contains the rows node; spacer divs pad the unrendered range.
+//
+// The rows container is CONDITIONALLY rendered (map.data && filtered.length
+// > 0), so a plain useRef + effect [ref] never re-runs after it mounts —
+// the listener would never attach and the list would silently truncate to
+// the initial ~viewport window (C1). Use a state-tracked node instead:
+// setNode fires when the container mounts/unmounts and the effect keys on
+// that node.
+function useViewportScroll() {
   const [view, setView] = useState({ top: 0, height: 800 })
+  const [node, setNode] = useState(null)
   useEffect(() => {
-    const node = ref.current
     if (!node) return undefined
     const vp = node.closest('[data-radix-scroll-area-viewport]') || node.parentElement
     if (!vp) return undefined
@@ -488,8 +495,8 @@ function useViewportScroll(ref) {
       vp.removeEventListener('scroll', onScroll)
       if (ro) ro.disconnect()
     }
-  }, [ref])
-  return view
+  }, [node])
+  return [view, setNode]
 }
 
 function SkillRow({ row, t, onOpen }) {
@@ -533,8 +540,7 @@ function MapView() {
     storageRef ? storageRef.get('filter', 'all') : 'all'
   )
   const [selected, setSelected] = useState(null)
-  const viewportRef = useRef(null)
-  const view = useViewportScroll(viewportRef)
+  const [view, viewportRef] = useViewportScroll()
 
   const meta = (map.data && map.data.meta) || {}
   const rows = useMemo(

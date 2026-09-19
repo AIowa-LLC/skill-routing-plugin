@@ -44,7 +44,14 @@ export const atom = init => ({ get: () => init, set() {} })
 export const useValue = () => null
 export const usePluginI18n = () => key => key // IS the t function
 export const queryClient = { invalidateQueries() { return Promise.resolve() } }
-export const useQuery = () => ({ data: { open_count: 2, worst_severity: 'critical', rows: [], findings: [], meta: { profiles: ['frontend'], counts_by_severity: {} } }, isLoading: false, isError: false, error: null, refetch() {} })
+// C1 harness: __setQueryData overrides what useQuery returns (default: the
+// legacy canned response).
+let QUERY_DATA = null
+export function __setQueryData(data) { QUERY_DATA = data }
+export const useQuery = () => {
+  const data = QUERY_DATA !== null ? QUERY_DATA : { open_count: 2, worst_severity: 'critical', rows: [], findings: [], meta: { profiles: ['frontend'], counts_by_severity: {} } }
+  return { data, isLoading: false, isError: false, error: null, refetch() {} }
+}
 export const useMutation = () => ({ isPending: false, isError: false, error: null, mutate() {}, mutateAsync: async () => {} })
 export const profileColor = () => null
 export const profileColorSoft = () => 'transparent'
@@ -75,10 +82,74 @@ export const Tip = passthrough('Tip')
 writeFileSync(
   join(stubs, 'react.mjs'),
   `
-export const useState = init => [typeof init === 'function' ? init() : init, () => {}]
-export const useEffect = () => undefined
-export const useMemo = fn => fn()
-export const useRef = () => ({ current: null })
+// Legacy stub behavior (component functions invoked directly by walk()):
+// identical to the previous no-op stubs.
+// __instance/__begin/__end/__flush drive a minimal hooks runtime for the
+// C1 virtualization section: useState setters schedule re-renders,
+// useEffect deps are compared and cleanups run, ref callbacks fire on the
+// test's commit step.
+let ACTIVE = null
+const QUEUE = []
+export function __instance(component) {
+  return { component, cursor: 0, states: {}, memos: {}, refs: {}, effects: {}, pending: [], tree: null }
+}
+export function __begin(inst) { ACTIVE = inst; inst.cursor = 0 }
+export function __end() { ACTIVE = null }
+export function __schedule(inst) { if (!QUEUE.includes(inst)) QUEUE.push(inst) }
+export function __runEffects(inst) {
+  for (const e of inst.pending) {
+    const prev = inst.effects[e.i]
+    if (prev && prev.cleanup) prev.cleanup()
+    inst.effects[e.i] = { deps: e.deps, cleanup: e.fn() || undefined }
+  }
+  inst.pending = []
+}
+export function __flush(limit = 100) {
+  let guard = 0
+  while (QUEUE.length && guard++ < limit) {
+    const inst = QUEUE.shift()
+    __begin(inst)
+    try { inst.tree = inst.component() } finally { __end() }
+    __runEffects(inst)
+  }
+  if (QUEUE.length) throw new Error('render queue did not settle')
+}
+export const useState = init => {
+  if (!ACTIVE) return [typeof init === 'function' ? init() : init, () => {}]
+  const i = ACTIVE.cursor++
+  if (!(i in ACTIVE.states)) ACTIVE.states[i] = typeof init === 'function' ? init() : init
+  const inst = ACTIVE
+  const setter = v => {
+    inst.states[i] = typeof v === 'function' ? v(inst.states[i]) : v
+    __schedule(inst)
+  }
+  return [inst.states[i], setter]
+}
+export const useEffect = (fn, deps) => {
+  if (!ACTIVE) return undefined
+  const i = ACTIVE.cursor++
+  const prev = ACTIVE.effects[i]
+  const changed = !prev || !deps || deps.length !== prev.deps.length ||
+    deps.some((d, j) => !Object.is(d, prev.deps[j]))
+  if (changed) inst_pending_push(ACTIVE, i, fn, deps)
+  return undefined
+}
+function inst_pending_push(inst, i, fn, deps) { inst.pending.push({ i, fn, deps }) }
+export const useMemo = (fn, deps) => {
+  if (!ACTIVE) return fn()
+  const i = ACTIVE.cursor++
+  const prev = ACTIVE.memos[i]
+  const changed = !prev || !deps || deps.length !== prev.deps.length ||
+    deps.some((d, j) => !Object.is(d, prev.deps[j]))
+  if (changed) ACTIVE.memos[i] = { value: fn(), deps }
+  return ACTIVE.memos[i].value
+}
+export const useRef = init => {
+  if (!ACTIVE) return { current: typeof init === 'function' ? init() : init }
+  const i = ACTIVE.cursor++
+  if (!(i in ACTIVE.refs)) ACTIVE.refs[i] = { current: typeof init === 'function' ? init() : init }
+  return ACTIVE.refs[i]
+}
 `
 )
 writeFileSync(
@@ -242,6 +313,114 @@ const chips = byArea('statusBar.right')
 const chip = chips[0].render()
 const chipTypes = types(chip)
 check(chipTypes.has('StatusDot') && chipTypes.has('Codicon'), 'statusbar chip renders StatusDot + Codicon')
+
+console.log('\n== C1: map virtualization attaches its scroll listener on late mount ==')
+// The rows container is conditionally rendered (map.data && rows), so the
+// scroll listener must attach when the container MOUNTS — not once at
+// page mount. Behavioral harness: a minimal hooks runtime drives MapView
+// through mount → commit(ref) → scroll → unmount against a fake viewport.
+{
+  const reactRT = await import(stubUrl('react.mjs'))
+  const sdkRT = await import(stubUrl('sdk.mjs'))
+  const RO = globalThis.ResizeObserver
+  if (RO) globalThis.ResizeObserver = undefined // determinism: no RO branch
+  try {
+    const rows = []
+    for (let i = 0; i < 200; i++) {
+      rows.push({
+        skill_id: 's-' + i, name: 'skill-' + i, category: 'cat', owner_profile: 'trt',
+        location: { scope: 'profile', profile: 'trt', path: '/p/skill-' + i },
+        state: 'clean', last_audit: null
+      })
+    }
+    sdkRT.__setQueryData({ rows, meta: { profiles: ['trt'], last_audit_ts: null } })
+
+    // recursive element scan that never invokes function components;
+    // flattens nested arrays in children (React children semantics)
+    function scan(node, visit, depth) {
+      if (!node || typeof node !== 'object' || depth > 30) return
+      if (Array.isArray(node)) {
+        node.forEach(child => scan(child, visit, depth))
+        return
+      }
+      visit(node)
+      const kids = node.props && node.props.children
+      const list = Array.isArray(kids) ? kids : kids ? [kids] : []
+      list.forEach(child => scan(child, visit, depth + 1))
+    }
+    function instantiate(element) {
+      const inst = reactRT.__instance(element.type)
+      reactRT.__begin(inst)
+      try { inst.tree = inst.component() } finally { reactRT.__end() }
+      reactRT.__runEffects(inst)
+      return inst
+    }
+    // commit: hand the rows-container node to whatever ref the render used
+    // (function ref-callback like real React, or legacy object ref)
+    function commitRef(tree, fakeNode) {
+      let done = false
+      scan(tree, n => {
+        if (!done && n.props && 'ref' in n.props) {
+          const r = n.props.ref
+          if (typeof r === 'function') { r(fakeNode); done = true }
+          else if (r && typeof r === 'object') { r.current = fakeNode; done = true }
+        }
+      }, 0)
+      if (!done) throw new Error('rows container ref not found in tree')
+    }
+    function countRows(tree) {
+      let count = 0
+      scan(tree, n => { if (typeof n.type === 'function' && n.type.name === 'SkillRow') count++ }, 0)
+      return count
+    }
+
+    const pageInst = instantiate(page)
+    let mapEl = null
+    scan(pageInst.tree, n => { if (!mapEl && typeof n.type === 'function' && n.type.name === 'MapView') mapEl = n }, 0)
+    check(mapEl !== null, 'MapView present in the page tree')
+    const inst = instantiate(mapEl)
+
+    const listeners = []
+    const fakeVp = {
+      scrollTop: 0, clientHeight: 800,
+      addEventListener(type, fn) { listeners.push(fn) },
+      removeEventListener() { listeners.length = 0 }
+    }
+    const fakeNode = { closest: () => fakeVp, parentElement: fakeVp }
+
+    commitRef(inst.tree, fakeNode) // rows container mounts late
+    reactRT.__flush()
+    check(listeners.length === 1, 'scroll listener attaches after the rows container mounts', 'listeners=' + listeners.length)
+
+    if (listeners.length === 1) {
+      const atMount = countRows(inst.tree)
+      fakeVp.scrollTop = 5000 // scroll to ~row 115 of 200
+      listeners[0]()
+      reactRT.__flush()
+      const afterScroll = countRows(inst.tree)
+      check(afterScroll !== atMount && afterScroll >= 28 && afterScroll <= 34, 'scrolling re-windows the rendered rows', 'mount=' + atMount + ' after=' + afterScroll)
+
+      let spacer = 0
+      scan(inst.tree, n => {
+        if (!spacer && n.props && n.props.ref === undefined && n.props.style && n.props.style.height) {
+          const h = parseInt(n.props.style.height, 10)
+          if (Number.isFinite(h)) spacer = Math.max(spacer, h)
+        }
+      }, 0)
+      check(spacer > 0, 'spacer pads the unrendered range above the window', 'height=' + spacer)
+    } else {
+      check(false, 'scrolling re-windows the rendered rows', 'skipped: no listener attached')
+      check(false, 'spacer pads the unrendered range above the window', 'skipped: no listener attached')
+    }
+
+    commitRef(inst.tree, null) // rows container unmounts
+    reactRT.__flush()
+    check(listeners.length === 0, 'listener detaches when the rows container unmounts', 'listeners=' + listeners.length)
+    sdkRT.__setQueryData(null)
+  } finally {
+    if (RO) globalThis.ResizeObserver = RO
+  }
+}
 
 console.log('\n== M8: audit outcome decision (timeout never reports success) ==')
 check(m.auditOutcome({ state: 'done', findings_count: 3 }).failed === false, "auditOutcome: state 'done' is success")
