@@ -259,6 +259,108 @@ class TestLedger:
         assert "run_id" in result
 
 
+class TestLedgerFailLoud:
+    """M5 (OCR review @ d1659fb): load failure must never silently map to
+    [] — the next save would wipe resolved/acknowledged audit history."""
+
+    def test_corrupt_ledger_raises_on_load_and_survives_scan(self, fleet):
+        import pytest
+
+        from skill_owner_routing import ledger
+
+        path = fleet["root"] / "skills" / ".skill_owner_findings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ this is not json", encoding="utf-8")
+
+        with pytest.raises(ledger.LedgerError):
+            ledger.load_findings()
+        # the audit path surfaces the failure (ok:false), it does NOT
+        # swallow it and overwrite the file with a fresh scan
+        from skill_owner_routing.drift import run_audit
+
+        result = json.loads(run_audit())
+        assert result["ok"] is False
+        assert path.read_text(encoding="utf-8") == "{ this is not json"
+
+    def test_unreadable_ledger_raises_and_blocks_save(self, fleet, monkeypatch):
+        import pytest
+
+        from skill_owner_routing import ledger
+
+        path = fleet["root"] / "skills" / ".skill_owner_findings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"findings": []}', encoding="utf-8")
+
+        def boom(*args, **kwargs):
+            raise PermissionError("transient read blip")
+
+        monkeypatch.setattr(ledger, "ledger_path", lambda: path)
+        monkeypatch.setattr(
+            "skill_owner_routing.ledger.Path.read_text", boom
+        )
+        with pytest.raises(ledger.LedgerError):
+            ledger.load_findings()
+
+        finding = {
+            "id": "unowned-x",
+            "kind": "unowned",
+            "severity": "low",
+            "skill": "x",
+            "expected_owner": None,
+            "actual": "default",
+            "proposed_fix": "fix",
+            "discovered_at": "2026-01-01T00:00:00Z",
+            "status": "open",
+        }
+        with pytest.raises(ledger.LedgerError):
+            ledger.upsert_findings([finding])
+        monkeypatch.undo()  # restore real read_text for the verification
+        assert path.read_text(encoding="utf-8") == '{"findings": []}'
+
+    def test_invalid_records_raise(self, fleet):
+        import pytest
+
+        from skill_owner_routing import ledger
+
+        path = fleet["root"] / "skills" / ".skill_owner_findings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"findings": [{"garbage": true}, {"id": "ok", "kind": "unowned", "skill": "s"}]}',
+            encoding="utf-8",
+        )
+        with pytest.raises(ledger.LedgerError):
+            ledger.load_findings()
+
+    def test_missing_ledger_still_returns_empty(self, fleet):
+        # no file yet (first ever scan) is NOT a failure
+        from skill_owner_routing import ledger
+
+        assert ledger.load_findings() == []
+
+    def test_list_action_reports_ledger_error(self, fleet):
+        # register.py's audit tool 'list' action must surface the failure
+        # as a JSON error, not an empty findings list
+        from skill_owner_routing.register import register
+
+        path = fleet["root"] / "skills" / ".skill_owner_findings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"findings": [', encoding="utf-8")
+
+        captured = {}
+
+        class Ctx:
+            def register_hook(self, *a, **k):
+                pass
+
+            def register_tool(self, name, handler, **k):
+                captured[name] = handler
+
+        register(Ctx())
+        result = json.loads(captured["skill_owner_audit"]({"action": "list"}))
+        assert result["ok"] is False
+        assert "ledger" in result["error"].lower()
+
+
 class TestCoexistence:
     def test_dormancy_when_core_enforces(self, fleet, enabled_config, monkeypatch):
         # A7b/D5: core symbol + core enabled → create gate DORMANT

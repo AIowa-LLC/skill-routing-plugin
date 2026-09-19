@@ -40,8 +40,19 @@ def register(ctx: Any) -> None:
 
         action = str(args.get("action") or "scan")
         if action == "list":
+            try:
+                findings = ledger.load_findings()
+            except ledger.LedgerError as exc:
+                # M5: fail-loud — never report an empty list over a ledger
+                # that could not be read; that would invite the next scan
+                # to overwrite and destroy the audit history.
+                logger.exception("skill-owner-routing ledger load failed")
+                return json.dumps(
+                    {"ok": False, "error": f"drift ledger unreadable: {exc}"},
+                    ensure_ascii=False,
+                )
             return json.dumps(
-                {"ok": True, "findings": ledger.load_findings()},
+                {"ok": True, "findings": findings},
                 ensure_ascii=False,
             )
         return drift.run_audit()
