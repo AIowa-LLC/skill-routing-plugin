@@ -98,9 +98,26 @@ def _gate_create(args: Dict[str, Any], name: str) -> Optional[Dict[str, str]]:
     if err is not None:
         return _block(err)
 
-    active = _active_profile()
-    if active is None:
-        return None  # cannot resolve actor — do not invent a denial
+    # FAIL-CLOSED (2026-09-19 ruling, OCR M1 + cross-check item 5): the
+    # old "cannot resolve actor — do not invent a denial" posture let any
+    # actor-resolution failure silently bypass the whole gate. Reversed:
+    # an unresolvable actor is a gate malfunction and blocks.
+    try:
+        active = _active_profile()
+    except Exception as exc:
+        logger.exception(
+            "skill-owner-routing gate error (fail-closed): "
+            "could not resolve the active profile"
+        )
+        return _block(
+            f"skill-owner-routing gate error (fail-closed): the routing gate "
+            f"could not resolve the active profile for this skill_manage "
+            f"call ({type(exc).__name__}) and blocked it to be safe. This "
+            f"is a gate malfunction, not a policy violation. Please retry "
+            f"the call; if it fails again, report this with the log "
+            f"traceback.",
+            error_code="gate-error",
+        )
 
     from .routed_create import _profile_exists
 
@@ -151,15 +168,49 @@ def _gate_mutation(action: str, name: str) -> Optional[Dict[str, str]]:
     if not name:
         return None
 
-    active = _active_profile()
-    if active is None:
-        return None
+    # FAIL-CLOSED (2026-09-19 ruling, OCR M1): an unresolvable actor is a
+    # gate malfunction and blocks — never a silent allow.
+    try:
+        active = _active_profile()
+    except Exception as exc:
+        logger.exception(
+            "skill-owner-routing gate error (fail-closed): "
+            "could not resolve the active profile"
+        )
+        return _block(
+            f"skill-owner-routing gate error (fail-closed): the routing gate "
+            f"could not resolve the active profile for this skill_manage "
+            f"call ({type(exc).__name__}) and blocked it to be safe. This "
+            f"is a gate malfunction, not a policy violation. Please retry "
+            f"the call; if it fails again, report this with the log "
+            f"traceback.",
+            error_code="gate-error",
+        )
 
     skill_md = lookup(name)
     if skill_md is None:
         return None  # unresolvable target: let core's own not-found path run
 
-    location_scope = _scope_of(skill_md)
+    # FAIL-CLOSED (2026-09-19 ruling, OCR M2): a target whose location
+    # cannot be resolved (ELOOP, permissions) is a gate malfunction and
+    # blocks — the old posture converted resolve() failures to a silent
+    # allow, contradicting the fail-closed contract.
+    try:
+        location_scope = _scope_of(skill_md)
+    except OSError as exc:
+        logger.exception(
+            "skill-owner-routing gate error (fail-closed): "
+            "could not resolve target skill location"
+        )
+        return _block(
+            f"skill-owner-routing gate error (fail-closed): the routing gate "
+            f"could not resolve where the target skill lives to evaluate "
+            f"this {action} ({type(exc).__name__}) and blocked it to be "
+            f"safe. This is a gate malfunction, not a policy violation. "
+            f"Please retry the call; if it fails again, report this with "
+            f"the log traceback.",
+            error_code="gate-error",
+        )
     if location_scope is None:
         return None
 
@@ -204,17 +255,22 @@ def _gate_mutation(action: str, name: str) -> Optional[Dict[str, str]]:
 
 
 def _scope_of(skill_md) -> "str | None":
-    """Map a SKILL.md path to its profile scope ('default' or profile name)."""
+    """Map a SKILL.md path to its profile scope ('default' or profile name).
+
+    Raises OSError when path resolution itself fails (ELOOP, permission
+    errors) — the caller treats that as a gate malfunction and blocks
+    (2026-09-19 ruling, OCR M2). A resolvable path outside both known
+    roots still returns None.
+    """
     from .common import fleet_default_home
 
-    try:
-        resolved = skill_md.resolve()
-        default_home = fleet_default_home().resolve()
-    except OSError:
-        return None
+    resolved = skill_md.resolve()
+    default_home = fleet_default_home().resolve()
     try:
         if resolved.is_relative_to(default_home / "profiles"):
             rest = resolved.relative_to(default_home / "profiles")
+            if not rest.parts:  # <default_home>/profiles itself is no scope
+                return None
             return rest.parts[0]
     except ValueError:
         pass
@@ -226,19 +282,24 @@ def _scope_of(skill_md) -> "str | None":
     return None
 
 
-def _active_profile() -> "str | None":
-    try:
-        from hermes_cli.profiles import get_active_profile_name
+def _active_profile() -> str:
+    """Resolve the actor, failing CLOSED on any resolution failure.
 
-        raw = get_active_profile_name() or "default"
-        from .frontmatter import resolve_owner_identity
+    Returns the normalized active profile name. Raises on any failure —
+    hermes_cli.profiles import, get_active_profile_name(), or identity
+    normalization — and callers must convert that into a gate-malfunction
+    block, never an allow (2026-09-19 ruling, OCR M1; reversed from the
+    old return-None fail-open posture).
+    """
+    from hermes_cli.profiles import get_active_profile_name
 
-        normalized, err = resolve_owner_identity(raw)
-        if err is not None:
-            return raw.strip().lower() or None
-        return normalized
-    except Exception:
-        return None
+    raw = get_active_profile_name() or "default"
+    from .frontmatter import resolve_owner_identity
+
+    normalized, err = resolve_owner_identity(raw)
+    if err is not None or not normalized:
+        raise ValueError("active profile name did not validate")
+    return normalized
 
 
 def _block(message: str, error_code: str = "policy-violation") -> Dict[str, str]:

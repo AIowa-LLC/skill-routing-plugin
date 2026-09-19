@@ -3,7 +3,9 @@
 Copyright (c) 2026 skill-owner-routing contributors. MIT licensed.
 """
 
+import logging
 import time
+from pathlib import Path
 
 from conftest import (
     OWNER_ROUTED_SKILL_CONTENT,
@@ -291,3 +293,124 @@ class TestMutationGate:
             index._profile_roots = original
         with index._LOCK:
             assert "escape" not in index._INDEX  # never cached into the fleet index
+
+
+# -- M1/M2 (OCR review @ d1659fb): fail-closed on actor/scope resolution ----
+#
+# Ruling 2026-09-19 (OCR M1/M2 + cross-check item 5): the fail-open
+# "cannot resolve actor — do not invent a denial" posture is REVERSED —
+# actor/scope-resolution failures are gate malfunctions and must block
+# with a message labeled GATE MALFUNCTION, never leaking exception text.
+
+GATE_MALFUNCTION_MARKERS = (
+    "gate malfunction",  # the label consumers are told to look for
+    "not a policy violation",  # never confused with a policy deny
+    "fail-closed",  # posture marker shared with the M10 family
+)
+
+
+def _assert_malfunction_block(result):
+    """A malfunction block: directive, label, error_code, no text leak."""
+    assert result is not None and result["action"] == "block"
+    msg = result["message"]
+    for marker in GATE_MALFUNCTION_MARKERS:
+        assert marker in msg, marker
+    assert result["error_code"] == "gate-error"
+    assert "sensitive-secret-boom" not in msg  # never leak exception text
+    assert "resolution-boom" not in msg
+
+
+class TestGateActorResolutionFailClosed:
+    """M1 — _active_profile() failures must block (fail-closed), not allow."""
+
+    def test_create_actor_resolution_failure_blocks_malfunction(
+        self, fleet, enabled_config, monkeypatch, caplog
+    ):
+        import hermes_cli.profiles as profiles_mod
+
+        def boom():
+            raise RuntimeError("sensitive-secret-boom")
+
+        monkeypatch.setattr(profiles_mod, "get_active_profile_name", boom)
+        with caplog.at_level(logging.ERROR, logger="skill_owner_routing.gate"):
+            result = call("create", content=OWNER_ROUTED_SKILL_CONTENT)
+        _assert_malfunction_block(result)
+        assert any(r.exc_info for r in caplog.records)  # full traceback logged
+
+    def test_mutation_actor_resolution_failure_blocks_malfunction(
+        self, fleet, enabled_config, monkeypatch, caplog
+    ):
+        import hermes_cli.profiles as profiles_mod
+
+        write_skill(fleet["trt"], "trt-skill", owner="trt")
+        set_active_profile(monkeypatch, fleet, "growth")
+
+        def boom():
+            raise RuntimeError("sensitive-secret-boom")
+
+        monkeypatch.setattr(profiles_mod, "get_active_profile_name", boom)
+        with caplog.at_level(logging.ERROR, logger="skill_owner_routing.gate"):
+            result = call("edit", name="trt-skill", content="x")
+        _assert_malfunction_block(result)
+        assert any(r.exc_info for r in caplog.records)
+
+    def test_actor_resolution_failure_never_touches_non_skill_tools(
+        self, fleet, enabled_config, monkeypatch
+    ):
+        # Zero-I/O early bail: a broken actor resolver must not affect
+        # anything but skill_manage.
+        import hermes_cli.profiles as profiles_mod
+
+        def boom():
+            raise RuntimeError("sensitive-secret-boom")
+
+        monkeypatch.setattr(profiles_mod, "get_active_profile_name", boom)
+        assert decide(tool_name="terminal", args={"command": "ls"}) is None
+        assert decide(tool_name="read_file", args={"path": "/etc"}) is None
+
+    def test_happy_path_create_still_allows(self, fleet, enabled_config, monkeypatch):
+        # Control: no fault → owner-matching create passes.
+        set_active_profile(monkeypatch, fleet, "trt")
+        assert call("create", content=OWNER_ROUTED_SKILL_CONTENT) is None
+
+
+class TestGateScopeResolutionFailClosed:
+    """M2 — _scope_of() resolution failures must block, not allow."""
+
+    def test_scope_resolve_oserror_blocks_malfunction(
+        self, fleet, enabled_config, monkeypatch, caplog
+    ):
+        from skill_owner_routing import index
+
+        skill_md = write_skill(fleet["trt"], "trt-skill", owner="trt")
+        set_active_profile(monkeypatch, fleet, "growth")
+
+        real_resolve = Path.resolve
+
+        def boom(self, strict=False):
+            if self.name == "SKILL.md":
+                raise OSError("resolution-boom ELOOP")
+            return real_resolve(self, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", boom)
+        monkeypatch.setattr(index, "lookup", lambda name: skill_md)
+        with caplog.at_level(logging.ERROR, logger="skill_owner_routing.gate"):
+            result = call("edit", name="trt-skill", content="x")
+        _assert_malfunction_block(result)
+        assert any(r.exc_info for r in caplog.records)
+
+    def test_happy_path_mutation_still_allows(self, fleet, enabled_config, monkeypatch):
+        # Control: no fault → own-home mutation passes.
+        set_active_profile(monkeypatch, fleet, "trt")
+        write_skill(fleet["trt"], "own-skill", owner="trt")
+        assert call("edit", name="own-skill", content="x") is None
+
+    def test_scope_of_degenerate_profiles_dir_does_not_crash(self, fleet):
+        # _scope_of(<default_home>/profiles) raised IndexError via an
+        # unguarded rest.parts[0] (OCR minors, gate.py:215-220). Degenerate
+        # paths must map to None (→ malfunction block at the call site),
+        # never escape as an uncaught crash.
+        from skill_owner_routing import gate
+
+        assert gate._scope_of(fleet["root"] / "profiles") is None
+
