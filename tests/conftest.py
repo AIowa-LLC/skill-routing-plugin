@@ -53,6 +53,15 @@ def fleet(tmp_path, monkeypatch):
     root = tmp_path / "hermes"
     (root / "profiles" / "trt").mkdir(parents=True)
     (root / "profiles" / "growth").mkdir(parents=True)
+    # Identity markers (SOUL.md): core ≥19e984ae2a requires one of its
+    # _PROFILE_IDENTITY_MARKERS before profile_exists() accepts a profiles/
+    # dir as a live profile — bare dirs now read as ghost shells and every
+    # gate create test would deny with "not registered". Same convention as
+    # the QA harness's make_fleet (tests/qa/contracts.py).
+    for p in ("trt", "growth"):
+        (root / "profiles" / p / "SOUL.md").write_text(
+            "# fixture profile\n", encoding="utf-8"
+        )
     monkeypatch.setenv("HERMES_HOME", str(root))
     monkeypatch.setattr(
         "hermes_cli.profiles.get_active_profile_name", lambda: "default"
