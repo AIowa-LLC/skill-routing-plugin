@@ -324,6 +324,70 @@ def test_policy_write_survives_engine_roundtrip(client, fleet, monkeypatch):
     assert plugin_api._load_engine() is not None
 
 
+# -- PUT /policy destructive-write guards (M6, OCR review @ d1659fb) ------------
+
+
+def test_policy_put_aborts_on_corrupt_config(client, fleet):
+    # (b) an unparseable config.yaml must abort the write — base persisted
+    # {skills: {owner_routing}} as the ENTIRE config.yaml, wiping every
+    # other user setting.
+    corrupt = "skills: [unclosed\n  broken: {{{\n"
+    (fleet / "config.yaml").write_text(corrupt)
+    res = client.put(f"{API}/policy", json={"enabled": False})
+    assert res.status_code == 503
+    assert "cannot be read" in res.json()["detail"] or "corrupt" in res.json()["detail"].lower()
+    assert (fleet / "config.yaml").read_text() == corrupt  # byte-identical
+
+
+def test_policy_put_aborts_on_unreadable_config(client, fleet, monkeypatch):
+    # (b, permission flavor) an existing config.yaml that cannot be read
+    # must abort the write, not reset the file.
+    (fleet / "config.yaml").write_text("skills:\n  owner_routing:\n    enabled: true\n")
+
+    def boom(*args, **kwargs):
+        raise PermissionError("disk blip")
+
+    monkeypatch.setattr("pathlib.Path.read_text", boom)
+    res = client.put(f"{API}/policy", json={"enabled": False})
+    monkeypatch.undo()  # restore real read_text for the verification
+    assert res.status_code == 503
+    on_disk = (fleet / "config.yaml").read_text()
+    assert on_disk == "skills:\n  owner_routing:\n    enabled: true\n"
+
+
+def test_policy_put_no_stale_fallback_when_core_save_fails(client, fleet, monkeypatch):
+    # (c) when core save_config raises, base fell through to the local
+    # fallback write built from the STALE pre-merge snapshot; the write
+    # must abort instead.
+    import hermes_cli.config as core_config
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("core save_config refused (managed scope)")
+
+    monkeypatch.setattr(core_config, "save_config", boom)
+    res = client.put(f"{API}/policy", json={"enabled": False})
+    assert res.status_code == 503
+    assert "core config save failed" in res.json()["detail"].lower()
+    # config.yaml untouched (fresh-home fixture has no config.yaml yet —
+    # a new one must NOT be created by a failed write)
+    assert not (fleet / "config.yaml").exists()
+
+
+def test_policy_put_lock_serializes_read_merge_write(client, fleet, monkeypatch):
+    # (a) the read-merge-write must run under _STATE_LOCK: PUT /policy
+    # calls _write_policy_home BEFORE taking the lock on base. Pin the
+    # invariant statically (the lock is process-global; a live race is
+    # not deterministically assertable here).
+    import inspect
+
+    src = inspect.getsource(plugin_api.put_policy)
+    assert "_STATE_LOCK" in src, "put_policy must hold _STATE_LOCK across the write"
+    body = src.split("def put_policy", 1)[1]
+    first_lock = body.index("_STATE_LOCK")
+    first_write = body.index("_write_policy_home")
+    assert first_lock < first_write, "lock must be acquired before the policy write"
+
+
 # -- POST /drift/{id}/resolve ----------------------------------------------------
 
 def test_resolve_flow(client):

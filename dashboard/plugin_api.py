@@ -575,24 +575,63 @@ def _write_policy_home(home: Path, patch: Dict[str, bool]) -> Dict[str, Any]:
     """Gated write: only the skills.owner_routing subtree, bools only, atomic.
 
     Prefers core load_config/save_config under a home override (managed-scope
-    + cache semantics); falls back to a local atomic YAML round-trip.
+    + cache semantics); falls back to a local atomic YAML round-trip ONLY
+    when the core config machinery is not importable.
+
+    Destructive-write guards (M6): an existing config.yaml that cannot be
+    read or parsed ABORTS the write (never persist a degraded/empty cfg as
+    the entire config.yaml), and a core load/save failure ABORTS too (never
+    fall through to a stale-snapshot write). Callers must hold _STATE_LOCK
+    so the read-merge-write is serialized.
     """
     cfg_path = home / "config.yaml"
-    before: Optional[Dict[str, Any]] = None
-    cfg: Dict[str, Any] = {}
+    # -- strict read: unreadable/corrupt existing config aborts -------------
     try:
-        loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
+        raw_cfg = cfg_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raw_cfg = None  # fresh home — creating a new config is legitimate
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"config.yaml exists but cannot be read "
+                f"({type(exc).__name__}). Policy write aborted; the config "
+                f"file was left untouched — repair it before retrying."
+            ),
+        ) from exc
+    if raw_cfg is None:
+        cfg: Dict[str, Any] = {}
+    else:
+        try:
+            loaded = yaml.safe_load(raw_cfg)
+        except yaml.YAMLError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"config.yaml cannot be parsed (corrupt YAML: "
+                    f"{str(exc)[:120]}). Policy write aborted; the config "
+                    f"file was left untouched — repair it before retrying."
+                ),
+            ) from exc
+        if loaded is None:
+            cfg = {}
+        elif isinstance(loaded, dict):
             cfg = loaded
-    except Exception:
-        cfg = {}
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "config.yaml has an invalid shape (expected a mapping). "
+                    "Policy write aborted; the config file was left "
+                    "untouched — repair it before retrying."
+                ),
+            )
     skills = cfg.get("skills")
     if not isinstance(skills, dict):
         skills = {}
         cfg["skills"] = skills
     sub = skills.get("owner_routing")
-    if isinstance(sub, dict):
-        before = dict(sub)
+    before: Optional[Dict[str, Any]] = dict(sub) if isinstance(sub, dict) else None
     merged = {
         "enabled": bool(patch.get("enabled", _truthy((before or {}).get("enabled"), True))),
         "require_owner_metadata": bool(
@@ -602,6 +641,7 @@ def _write_policy_home(home: Path, patch: Dict[str, bool]) -> Dict[str, Any]:
             patch.get("route_from_default", _truthy((before or {}).get("route_from_default"), True))
         ),
     }
+    # -- core path; local fallback ONLY when core is not importable ----------
     try:
         from hermes_cli.config import load_config, save_config
         from hermes_constants import (
@@ -620,12 +660,27 @@ def _write_policy_home(home: Path, patch: Dict[str, bool]) -> Dict[str, Any]:
             save_config(core_cfg)
         finally:
             reset_hermes_home_override(token)
-    except Exception:
+    except HTTPException:
+        raise
+    except ImportError:
+        # Core config machinery not importable (non-Hermes host): local
+        # atomic round-trip on the strict-read snapshot taken above.
         skills["owner_routing"] = merged
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = cfg_path.with_name(f".{cfg_path.name}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True), encoding="utf-8")
         os.replace(tmp, cfg_path)
+    except Exception as exc:
+        # Core refused or failed mid-write: abort. Never fall through
+        # to a local write from the pre-merge snapshot — that is how a
+        # stale config replaces a newer one.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"core config save failed ({type(exc).__name__}). "
+                f"Policy write aborted; config.yaml was left untouched."
+            ),
+        ) from exc
     result = _read_policy_home(home)
     result["config_diff"] = {"path": str(cfg_path), "before": before, "after": merged}
     return result
@@ -1599,7 +1654,14 @@ def put_policy(patch: PolicyPatch) -> Dict[str, Any]:
     if not updates:
         raise HTTPException(status_code=400, detail="No policy fields to update.")
     home = _default_home()
-    result = _write_policy_home(home, updates)
+    # M6(a): hold _STATE_LOCK across the WHOLE read-merge-write — the
+    # config.yaml round-trip in _write_policy_home is not otherwise
+    # serialized and concurrent PUTs lose updates.
+    with _STATE_LOCK:
+        result = _write_policy_home(home, updates)
+        state = _load_state(home)
+        _append_history(state, f"policy: {json.dumps(updates, sort_keys=True)}", None)
+        _save_state(state, home)
     diff = result.pop("config_diff", None)
     core = _core_enforces(_default_home())
     policy_view = {
@@ -1610,10 +1672,6 @@ def put_policy(patch: PolicyPatch) -> Dict[str, Any]:
         "core_enforces": core,
         "posture": _posture(result, core),
     }
-    with _STATE_LOCK:
-        state = _load_state(home)
-        _append_history(state, f"policy: {json.dumps(updates, sort_keys=True)}", None)
-        _save_state(state, home)
     _broadcast("invalidate")
     return {"policy": policy_view, "config_diff": diff}
 
