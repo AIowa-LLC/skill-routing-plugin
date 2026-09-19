@@ -176,7 +176,9 @@ The plugin is deliberately boring about your data:
 - **The gate fails closed.** An unexpected engine error during a
   `skill_manage` call blocks that call with a message explicitly labeled as a
   gate malfunction — never silently allowed, never confused with a policy
-  violation, and never leaking exception text.
+  violation, and never leaking exception text. Actor- and scope-resolution
+  failures (cannot determine the active profile, cannot resolve where the
+  target skill lives) are malfunction-blocked the same way.
 - **Symlink containment.** Skill directories or `SKILL.md` files that are
   symlinks resolving outside the scanned home are skipped with a warning —
   never read or indexed.

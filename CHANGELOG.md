@@ -5,6 +5,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to no strict versioning schedule — releases mark
 verified stability points of the audit-hardened kit.
 
+## [Unreleased]
+
+Pre-release repairs from the OCR full-repo review at v0.2.0-RC (d1659fb),
+stacked for the v0.2.0 gate.
+
+### Gate fail-closed posture (2026-09-19 ruling)
+
+- Gate fail-closed on actor/scope resolution (M1/M2): failures to resolve
+  the active profile or the target skill's location during a
+  `skill_manage` call now block with a gate-malfunction message
+  (error_code `gate-error`, exception class named, text never leaked)
+  instead of silently allowing the mutation. Full tracebacks are logged.
+  Reverses the prior "cannot resolve actor — do not invent a denial"
+  posture per the 2026-09-19 ruling (OCR M1/M2 + cross-check item 5).
+  Also guards the `_scope_of` IndexError on degenerate
+  `<home>/profiles` paths (OCR minors).
+- Test-fixture identity markers: the dev-suite `fleet` fixture now stamps
+  `SOUL.md` profile identity markers, matching the QA harness convention
+  — core 19e984ae2a stopped recognizing bare `profiles/<name>/` dirs as
+  live profiles, which had reddened 11 create/routed-create tests.
+
+### Repairs landed on the stacked base (t_bbaf8adc)
+
+- Ownership-map virtualization (C1): the desktop map's scroll listener now
+  attaches when the rows container mounts — the windowed list previously
+  rendered only the first ~24 rows on any real fleet.
+- Index traversal containment (M3): traversal-shaped skill names are
+  rejected outright and bounded-scan hits must pass the same
+  fleet-containment check as cache hits before being returned or cached.
+- Ledger fail-loud (M5): unreadable/corrupt/invalid findings ledgers
+  block scans and mutations with a clear error instead of silently
+  resetting audit history on the next save.
+- Policy write guards (M6): `PUT /policy` takes the state lock before
+  touching config.yaml, aborts byte-identical on merge failure, and its
+  fallback runs only when core config machinery is unavailable — the
+  stale-snapshot wipe of the whole config.yaml is gone.
+- Hoarding marker boundary (M9): the justification body marker now
+  requires a trailing boundary; suffixed spellings (`-legacy`, `-v2`)
+  no longer pass the lint.
+
 ## [0.2.0] — 2026-09-13
 
 Security, hygiene, and release-mechanics release following the audit
