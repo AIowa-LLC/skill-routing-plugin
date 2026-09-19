@@ -33,7 +33,15 @@ def lookup(name: str) -> Optional[Path]:
     current fleet root (a process can switch HERMES_HOME between profiles);
     on miss (or stale hit) falls back to a bounded scan across profile
     homes. Returns None when unresolvable.
+
+    Containment is symmetric: BOTH the cache-hit and the scan-hit path
+    enforce ``_within_current_fleet`` before a result is returned or
+    cached, and traversal-shaped names are rejected outright — ``name``
+    arrives from skill_manage args and must never be joined into a path
+    that can escape the skills roots.
     """
+    if not _is_plain_skill_name(name):
+        return None
     with _LOCK:
         indexed = _INDEX.get(name)
     if indexed is not None:
@@ -42,13 +50,29 @@ def lookup(name: str) -> Optional[Path]:
             return candidate
 
     found = _bounded_scan(name)
-    if found is not None:
+    if found is not None and _within_current_fleet(found):
         with _LOCK:
             _INDEX[name] = str(found)
-    else:
-        with _LOCK:
-            _INDEX.pop(name, None)  # drop stale entries on confirmed miss
-    return found
+        return found
+    with _LOCK:
+        _INDEX.pop(name, None)  # drop stale entries on confirmed miss
+    return None
+
+
+def _is_plain_skill_name(name: str) -> bool:
+    """A single path component: no separators, no traversal, no dotfiles.
+
+    ``skills/<name>/SKILL.md`` can then never leave the skills root, no
+    matter what the caller passes (A6b posture for mutation targets —
+    same rule the owner-id validation applies at the front door).
+    """
+    return (
+        isinstance(name, str)
+        and name not in ("", ".", "..")
+        and "/" not in name
+        and "\\" not in name
+        and (Path(name).name == name)
+    )
 
 
 def _within_current_fleet(candidate: Path) -> bool:
@@ -101,7 +125,11 @@ def _profile_roots() -> list:
 
 def _bounded_scan(name: str) -> Optional[Path]:
     """Scan profile skill roots for ``<skills>/<name>/SKILL.md`` (top level
-    + one category level). Bounded: 2 rglob levels max, no full descent."""
+    + one category level). Bounded: 2 rglob levels max, no full descent.
+    Traversal-shaped names are never joined into a path (see
+    ``_is_plain_skill_name``)."""
+    if not _is_plain_skill_name(name):
+        return None
     for skills_dir in _profile_roots():
         if not skills_dir.is_dir():
             continue

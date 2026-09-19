@@ -252,3 +252,42 @@ class TestMutationGate:
         found = index.lookup("moved-skill")  # stale → fallback scan finds real
         assert found is not None
         assert found.parent.name == "moved-skill"
+
+    # -- M3 (OCR review @ d1659fb): traversal containment in the index -------
+
+    def test_traversal_shaped_names_resolve_to_none(self, fleet, enabled_config):
+        # `name` reaches lookup() straight from skill_manage args; it must
+        # never be joined into a path that can escape the skills roots. The
+        # decoys prove the payloads WOULD hit on a naive join: base returns
+        # hermes/SKILL.md for ".." and skills/nested-target/SKILL.md for
+        # "x/../nested-target".
+        from skill_owner_routing import index
+
+        (fleet["root"] / "SKILL.md").write_text("decoy\n", encoding="utf-8")
+        write_skill(fleet["root"], "nested-target", owner="trt")
+        for bad in ["..", "../..", "a/../b", "x/../nested-target", "."]:
+            assert index.lookup(bad) is None, bad
+            assert index._bounded_scan(bad) is None, bad
+        assert index.lookup("nested-target") is not None  # plain name still works
+
+    def test_scan_hit_outside_current_fleet_is_not_returned_or_cached(self, fleet, tmp_path):
+        # Symmetric containment: a bounded-scan hit must pass the same
+        # _within_current_fleet check the cache-hit path enforces before it
+        # is returned or cached — an out-of-fleet file a scan could reach
+        # (e.g. via a symlinked skills root) must resolve to None.
+        from skill_owner_routing import index
+
+        outside = tmp_path / "outside-fleet" / "escape" / "SKILL.md"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("---\nname: escape\n---\nbody\n", encoding="utf-8")
+
+        fake_roots = [tmp_path / "outside-fleet"]
+        original = index._profile_roots
+        index._profile_roots = lambda: fake_roots
+        try:
+            assert index._within_current_fleet(outside) is False
+            assert index.lookup("escape") is None
+        finally:
+            index._profile_roots = original
+        with index._LOCK:
+            assert "escape" not in index._INDEX  # never cached into the fleet index
