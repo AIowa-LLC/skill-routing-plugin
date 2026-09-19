@@ -21,7 +21,7 @@ JUSTIFICATION_KEYS = {
 
 _BODY_MARKER = re.compile(
     r"global[- ]justification:\s*(control-plane|shared-primitive|"
-    r"verified-structural-dependency)",
+    r"verified-structural-dependency)(?![-\w])",
     re.IGNORECASE,
 )
 

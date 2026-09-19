@@ -170,6 +170,38 @@ class TestHoardingLint:
             for f in result["findings"]
         )
 
+    def test_suffixed_marker_not_accepted(self, fleet):
+        # M9 (OCR review @ d1659fb): the body-marker regex had no trailing
+        # boundary, so "control-plane-legacy" / "shared-primitive-v2" /
+        # "control-planeX" matched their prefix and silently passed the
+        # hoarding lint. (The plural y→ies case does NOT match — do not
+        # use it.) Probed red on base via hoarding.global_justification.
+        from skill_owner_routing.hoarding import global_justification
+
+        for bad_body in [
+            "global justification: control-plane-legacy\n",
+            "global justification: shared-primitive-v2\n",
+            "global justification: control-planeX\n",
+        ]:
+            assert global_justification({}, bad_body) is None, bad_body
+        # exact keys still pass
+        assert global_justification({}, "global justification: control-plane\n") == "control-plane"
+        assert global_justification({}, "global-justification: shared-primitive\n") == "shared-primitive"
+        # and the same suffixed markers in a real scan produce findings
+        for i, marker in enumerate(
+            ["control-plane-legacy", "shared-primitive-v2", "control-planeX"]
+        ):
+            skill_dir = fleet["root"] / "skills" / f"suffixed-{i}"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: suffixed-{i}\ndescription: x.\n---\n\n"
+                f"global justification: {marker}\n",
+                encoding="utf-8",
+            )
+        result = run_scan()
+        flagged = {f["skill"] for f in result["findings"] if f["kind"] == "unowned"}
+        assert {"suffixed-0", "suffixed-1", "suffixed-2"} <= flagged
+
     def test_body_marker_justification_accepted(self, fleet):
         skill_dir = fleet["root"] / "skills" / "marked"
         skill_dir.mkdir(parents=True)
