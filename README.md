@@ -145,7 +145,7 @@ same edit with a recorded history event.
 
 | Variable | Purpose |
 |---|---|
-| `HERMES_DASHBOARD_SESSION_TOKEN` | Auth credential for the dashboard API in standalone/test mounts, and Hermes' own fixed-token dashboard auth. Sent as `X-Hermes-Session-Token`. Minimum 22 chars / 16 bytes — weaker or unset values fail closed (every route stays protected). Never passed as a URL query parameter. |
+| `HERMES_DASHBOARD_SESSION_TOKEN` | Auth credential for the dashboard API in standalone/test mounts, and Hermes' own fixed-token dashboard auth. Sent as `X-Hermes-Session-Token`. Minimum 22 chars / 16 bytes — weaker or unset values fail closed (every route stays protected). REST bodies never carry it as a query parameter; the standalone WebSocket is the one surface that accepts it as `?token=` (host-mounted sockets use the host's own ticket gate instead). |
 | `HERMES_DASHBOARD_PUBLIC_URL` | When the dashboard is exposed behind a public URL, the plugin's WebSocket additionally accepts exactly this origin. |
 | `SORE_CORE_ROOT`, `HERMES_VENV_PY` | Development/QA only — point the test suite and gate runner at a Hermes core checkout and its venv. Not needed for installed use. |
 

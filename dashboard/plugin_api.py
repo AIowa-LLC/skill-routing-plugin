@@ -99,6 +99,12 @@ _STATE_LOCK = threading.RLock()
 _SOCKS_LOCK = threading.Lock()
 _SOCKETS: set = set()
 _LOOPS: set = set()
+#: (loop, sock) pairs registered by /events — each socket is scheduled on
+#: ITS OWN loop only. The old separate sets made _broadcast schedule
+#: every socket on EVERY registered loop (loop×socket cross product):
+#: foreign-loop sends raise (swallowed) or race transports, and each
+#: failed pair burns the 1s timeout.
+_SOCK_PAIRS: list = []
 _ENGINE_CACHE: List[Any] = [None, False]  # [module, probed]
 _CORE_CACHE: List[Any] = [0.0, False]  # [expires_at, value]
 
@@ -149,13 +155,20 @@ def _now_ms() -> int:
 
 
 def _to_ms(value: Any) -> int:
-    """Epoch ms from epoch s/ms, ISO-8601, or 0."""
+    """Epoch ms from epoch s/ms, ISO-8601, or 0.
+
+    The string branch converts like the numeric one (OCR minor, PROBED:
+    ``_to_ms('1699999999')`` returned 1699999999 — epoch SECONDS — and
+    the UI rendered Jan-1970): numeric-looking strings get the same
+    ≤1e12 seconds→milliseconds conversion numbers get.
+    """
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         ms = float(value)
         return int(ms if ms > 1e12 else ms * 1000)
     if isinstance(value, str) and value:
         try:
-            return int(float(value))
+            num = float(value)
+            return int(num if num > 1e12 else num * 1000)
         except ValueError:
             pass
         try:
@@ -346,45 +359,9 @@ async def _require_auth(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-_WS_TICKETS: Dict[str, Tuple[float, str]] = {}
-_WS_TICKET_TTL = 30.0  # seconds — parity with the host's ws_tickets.TTL_SECONDS
+_WS_REJECT_LOG_CAP = 16
 #: Bounded warning when a WS upgrade fails validation (no reason detail: the
 #: rejection must not reveal which check failed).
-_WS_REJECT_LOG_CAP = 16
-
-
-def _mint_ws_ticket() -> Optional[str]:
-    """Single-use short-lived ticket for standalone WS upgrades.
-
-    Mirrors the host's POST /api/auth/ws-ticket semantics (30s, one-use). In
-    host mounts the SDK's ticket flow goes through the host endpoint; this
-    path exists so a standalone deployment has an equivalent mechanism.
-    """
-    import secrets
-
-    expected = _standalone_token()
-    if expected is None:
-        return None  # no standalone credential configured — fail closed
-    ticket = secrets.token_urlsafe(32)
-    now = time.time()
-    with _AUTH_LOCK:
-        # GC expired entries on mint (bounded memory)
-        for t in [t for t, (exp, _) in _WS_TICKETS.items() if exp < now]:
-            _WS_TICKETS.pop(t, None)
-        _WS_TICKETS[ticket] = (now + _WS_TICKET_TTL, "standalone")
-    return ticket
-
-
-def _consume_ws_ticket(ticket: str) -> bool:
-    """Validate + consume a single-use ticket (True when valid)."""
-    if not ticket:
-        return False
-    with _AUTH_LOCK:
-        entry = _WS_TICKETS.pop(ticket, None)
-    if entry is None:
-        return False
-    expires_at, _info = entry
-    return expires_at >= time.time()
 
 
 def _ws_origin_allowed(origin: str) -> bool:
@@ -1051,19 +1028,49 @@ def _append_history(state: Dict[str, Any], event: str, skill: Optional[str]) -> 
     del state["history"][:-_EVENT_HISTORY_CAP]
 
 
-def _ensure_scan(state: Dict[str, Any], home: Path) -> None:
+def _ensure_scan(state: Dict[str, Any], home: Path, precomputed: "Dict[str, Any] | None" = None) -> None:
+    """Seed the map state on cold start; no-op once rows exist.
+
+    ``precomputed`` is a fleet scan the CALLER already ran OUTSIDE
+    _STATE_LOCK (pattern per _run_audit): a cold-start full-fleet scan
+    under the lock stalled every dashboard route for its duration
+    (OCR minor). Supplied only when ``_cold_scan_needed`` said one was
+    warranted; consumed here under the lock after the cheap state
+    re-checks (a concurrent writer may have seeded rows meanwhile —
+    then the precomputed scan is simply discarded).
+    """
     if state.get("rows"):
         # Engine findings land in its ledger only via a scan; run one so the
         # Drift Feed shows fixture drift before any explicit audit.
+        # (If the caller precomputed, that scan already upserted the
+        # ledger — the _engine_findings re-check sees it and skips.)
         engine = _load_engine()
         if engine is not None and _engine_findings(home) is None:
             _engine_call(engine, "scan", home, submodule="drift")
         elif engine is None and "findings" not in state:
             # M7 backfill: rows present but the fallback feed was never
             # seeded (pre-fix state.json) — populate it via our own scan.
-            _merge_fallback_findings(state, _scan_fleet(home)["findings"])
+            _merge_fallback_findings(
+                state,
+                (precomputed if precomputed is not None else _scan_fleet(home))["findings"],
+            )
         return
-    _merge_scan(state, _scan_fleet(home), audit=False)
+    _merge_scan(
+        state, precomputed if precomputed is not None else _scan_fleet(home), audit=False
+    )
+
+
+def _cold_scan_needed(home: Path) -> bool:
+    """Cheap (state-read-only) check whether an entry route needs the
+    full-fleet scan — the scan itself then runs OUTSIDE _STATE_LOCK."""
+    engine = _load_engine()
+    with _STATE_LOCK:
+        state = _load_state(home)
+    if state.get("rows"):
+        if engine is not None:
+            return _engine_findings(home) is None
+        return "findings" not in state
+    return True
 
 
 def _merge_scan(state: Dict[str, Any], scan: Dict[str, Any], audit: bool) -> int:
@@ -1169,7 +1176,11 @@ def _run_audit(home: Path, run_id: str) -> None:
         if len(runs) > _RUN_HISTORY_CAP:
             keep = sorted(runs.items(), key=lambda kv: kv[1].get("finished_at", 0), reverse=True)[:_RUN_HISTORY_CAP]
             state["runs"] = dict(keep)
-        _merge_rows(state, scan if _append_audit_history is not None else {"rows": [], "profiles": []})
+        _merge_rows(
+            state,
+            scan if _append_audit_history is not None else {"rows": [], "profiles": []},
+            scanned=_append_audit_history is not None,
+        )
         if _append_audit_history is not None and _load_engine() is None:
             # M7: fallback audits refresh the Drift Feed; findings_count
             # reports the MERGED feed (resolutions preserved), mirroring
@@ -1179,14 +1190,24 @@ def _run_audit(home: Path, run_id: str) -> None:
     _broadcast("invalidate")
 
 
-def _merge_rows(state: Dict[str, Any], scan: Dict[str, Any]) -> None:
+def _merge_rows(state: Dict[str, Any], scan: Dict[str, Any], scanned: bool = True) -> None:
+    """Merge a scan's rows/profiles and stamp freshness timestamps.
+
+    ``scanned=False`` (the run FAILED — caller passes an empty scan)
+    stamps nothing: last_scan_ts asserted a scan that never happened,
+    and the old all-runs-done heuristic let one lingering failed
+    sibling run permanently suppress last_audit_ts for later succeeded
+    audits (OCR minor). A succeeded run stamps both timestamps itself;
+    its own outcome is the only input that matters.
+    """
     if scan.get("rows"):
         state["rows"] = scan["rows"]
         state["profiles"] = scan.get("profiles", state.get("profiles", []))
+    if not scanned:
+        return
     stamp = _now_ms()
     state["last_scan_ts"] = stamp
-    if state.get("runs") and all(r.get("state") == "done" for r in state["runs"].values() if r):
-        state["last_audit_ts"] = stamp
+    state["last_audit_ts"] = stamp
 
 
 # ---------------------------------------------------------------------------
@@ -1195,14 +1216,14 @@ def _merge_rows(state: Dict[str, Any], scan: Dict[str, Any]) -> None:
 
 def _broadcast(message: str) -> None:
     with _SOCKS_LOCK:
-        loops = list(_LOOPS)
-        socks = list(_SOCKETS)
-    for loop in loops:
-        for sock in socks:
-            try:
-                asyncio.run_coroutine_threadsafe(sock.send_text(message), loop).result(timeout=1.0)
-            except Exception:
-                pass
+        pairs = list(_SOCK_PAIRS)
+    for loop, sock in pairs:
+        try:
+            asyncio.run_coroutine_threadsafe(sock.send_text(message), loop).result(timeout=1.0)
+        except Exception:
+            logger.exception(
+                "skill-owner-routing: /events push to a subscriber failed"
+            )
 
 
 @router.websocket("/events")
@@ -1225,6 +1246,7 @@ async def events(ws: WebSocket) -> None:
     with _SOCKS_LOCK:
         _SOCKETS.add(ws)
         _LOOPS.add(loop)
+        _SOCK_PAIRS.append((loop, ws))
     try:
         while True:
             await ws.receive_text()
@@ -1235,6 +1257,8 @@ async def events(ws: WebSocket) -> None:
             _SOCKETS.discard(ws)
             if not _SOCKETS:
                 _LOOPS.discard(loop)
+            # slice-assign (in-place): rebinding would make the name local
+            _SOCK_PAIRS[:] = [p for p in _SOCK_PAIRS if p[1] is not ws]
 
 
 _WS_REJECTS: List[float] = []
@@ -1252,22 +1276,19 @@ def _ws_authenticated(ws: WebSocket) -> bool:
     """WS-upgrade credential check, aligned with the host's own gate.
 
     Host gate parity (web_server_chat._ws_auth_reason): loopback mode accepts
-    the session-token as ``?token=`` (constant-time); gated mode is
-    ticket-only (``?ticket=`` single-use, 30s TTL — a leaked session token
-    must not grant WS access), with host-minted tickets validated by the
-    host's canonical gate. Standalone mode accepts this module's own
-    single-use tickets or the explicitly-configured session token. Fail
-    closed on anything else.
+    the session-token as ``?token=`` (constant-time); gated mode defers to
+    the host's canonical ticket gate (host-minted single-use tickets,
+    validated + consumed there). Standalone mode accepts the explicitly
+    configured session token only — this module mints no tickets (the
+    never-used mint path was removed; standalone ?ticket= can no longer
+    authenticate). Fail closed on anything else.
     """
     host_mod = sys.modules.get("hermes_cli.web_server")
     ticket = ws.query_params.get("ticket", "")
     token = ws.query_params.get("token", "")
     if host_mod is not None and _host_app_auth_required(ws):
-        # Gated host mode: ticket-only. Host-minted tickets live in the
-        # host's store — defer to the canonical gate (it consumes them,
-        # enforcing single-use + TTL).
-        if ticket and _consume_ws_ticket(ticket):
-            return True
+        # Gated host mode: defer to the canonical gate — it consumes
+        # host-minted tickets itself, enforcing single-use + TTL.
         try:
             from hermes_cli import web_server_chat as _gate
 
@@ -1275,7 +1296,7 @@ def _ws_authenticated(ws: WebSocket) -> bool:
         except Exception:
             return False
     if ticket:
-        return _consume_ws_ticket(ticket)
+        return False  # no module-minted tickets exist — fail closed
     if not token:
         return False
     expected = _standalone_token()
@@ -1451,9 +1472,12 @@ def _read_skill_md_contained(
 @router.get("/map", dependencies=[Depends(_require_auth)])
 def get_map() -> Dict[str, Any]:
     home = _default_home()
+    # Cold-start scan OUTSIDE _STATE_LOCK (pattern per _run_audit): under
+    # the lock it stalled every dashboard route for the scan duration.
+    precomputed = _scan_fleet(home) if _cold_scan_needed(home) else None
     with _STATE_LOCK:
         state = _load_state(home)
-        _ensure_scan(state, home)
+        _ensure_scan(state, home, precomputed=precomputed)
         rows = list(state.get("rows", []))
         last_audit = _last_audit_ts(state, _live_findings(state, home))
         _save_state(state, home)
@@ -1483,10 +1507,12 @@ def get_map() -> Dict[str, Any]:
 @router.get("/map/{skill_id}", dependencies=[Depends(_require_auth)])
 def get_map_detail(skill_id: str) -> Dict[str, Any]:
     home = _default_home()
+    # Cold-start scan OUTSIDE _STATE_LOCK (see get_map).
+    precomputed = _scan_fleet(home) if _cold_scan_needed(home) else None
     with _STATE_LOCK:
         state = _load_state(home)
-        _ensure_scan(state, home)
-        rows = state.get("rows", [])
+        _ensure_scan(state, home, precomputed=precomputed)
+        rows = list(state.get("rows", []))
         history_source = state.get("history", [])
         _save_state(state, home)
     row = next((r for r in rows if r["skill_id"] == skill_id), None)

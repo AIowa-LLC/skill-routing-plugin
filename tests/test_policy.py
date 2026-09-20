@@ -94,3 +94,93 @@ class TestPolicyContract:
             "skills:\n  owner_routing:\n    enabled: false\n", encoding="utf-8"
         )
         assert _read_policy()["enabled"] is False
+
+
+class TestConcurrentReads:
+    """M4 — _load() must run under _LOCK (double-checked locking).
+
+    _load() flips process-global home-override state; concurrent cold-cache
+    readers running it outside the lock interleave set/reset (wrong-home
+    reads, stuck override) and redundantly repeat the load. Post-fix, a
+    cache miss loads once under the lock and every other waiter gets the
+    cached dict.
+    """
+
+    def test_cold_cache_stampede_loads_once(self, fleet, monkeypatch):
+        import threading
+        import time
+
+        from skill_owner_routing import policy
+
+        calls = []
+        real_load = policy._load
+
+        def slow_load(home, path):
+            calls.append(threading.get_ident())
+            time.sleep(0.08)  # widen the window where the cache is still empty
+            return real_load(home, path)
+
+        monkeypatch.setattr(policy, "_load", slow_load)
+
+        results = {}
+        errors = []
+
+        def reader(i):
+            try:
+                results[i] = policy.read_policy()
+            except Exception as exc:  # pragma: no cover — surfaced below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=reader, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+            time.sleep(0.01)  # stagger so later threads miss the cache too
+        for t in threads:
+            t.join()
+
+        assert not errors
+        assert len(calls) == 1, f"expected exactly one load, got {len(calls)}"
+        assert len({id(r) for r in results.values()}) == 4  # independent dicts
+        assert all(r["enabled"] is True for r in results.values())
+
+
+class TestUnparseableConfigWarns:
+    """Minor (policy.py:86-87 family) — a config that exists but cannot be
+    honored must never degrade to defaults SILENTLY. Core's load_config
+    never raises on broken YAML (it serves defaults), so a corrupt file
+    that says ``enabled: false`` used to silently re-ENABLE routing. The
+    degrade-to-defaults posture stays (a typo must not freeze mutations)
+    but an unparseable config now logs a loud warning naming the file;
+    a merely-absent key stays silent (documented default-ON divergence).
+    """
+
+    def test_broken_yaml_that_says_disabled_warns(self, fleet, caplog):
+        import logging
+
+        fleet["root"].joinpath("config.yaml").write_text(
+            "skills:\n"
+            "  owner_routing:\n"
+            "    enabled: false\n"
+            "  other: [unclosed\n",
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="skill_owner_routing.policy"):
+            pol = _read_policy()
+        assert pol["enabled"] is True  # degrade-to-defaults posture kept
+        assert any(
+            "NOT in effect" in r.getMessage() and "config.yaml" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_absent_key_stays_silent(self, fleet, caplog):
+        import logging
+
+        # config exists, parses, key absent — the documented divergence
+        # must not cry wolf on every standard install.
+        fleet["root"].joinpath("config.yaml").write_text(
+            "model: grok\n", encoding="utf-8"
+        )
+        with caplog.at_level(logging.WARNING, logger="skill_owner_routing.policy"):
+            pol = _read_policy()
+        assert pol["enabled"] is True
+        assert not [r for r in caplog.records if "NOT in effect" in r.getMessage()]

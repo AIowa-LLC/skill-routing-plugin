@@ -5,6 +5,130 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to no strict versioning schedule — releases mark
 verified stability points of the audit-hardened kit.
 
+## [0.2.1] — 2026-09-20
+
+Completes the OCR full-repo remediation: the five remaining majors and the
+worth-fixing minors, verified on pinned core 3e09e5a15f (369/369 suite,
+desktop contract ALL PASS, red-on-base receipts per group).
+
+v0.2.1 follow-up from the OCR full-repo review (remaining majors +
+selected minors), verified on pinned core 3e09e5a15f. The probed
+`_scope_of` degenerate-path guard named in the triage was already
+covered by the M1/M2 commit on master (gate.py guard + test).
+
+### Concurrency & silent-degradation majors
+
+- Policy load under the lock (M4): `read_policy()` now runs the
+  cold-cache `_load()` under `_LOCK` (double-checked locking). `_load()`
+  mutates process-global home-override state; concurrent dashboard
+  threadpool readers could interleave set/reset (wrong-home read,
+  SPEC-1) or leave the override stuck on — and every racer repeated the
+  load. Stampede test pins exactly one load under 4 racing readers.
+- Home-override env fallback always pins (M7): when the core token
+  machinery is unavailable, `_home_override` now always sets
+  `HERMES_HOME` (the old code only set it when already set, silently
+  no-op'ing otherwise — engine calls then resolved the REAL fleet home,
+  the exact wrong-fleet read this module exists to prevent). Exit
+  restores the pre-entry state exactly, including "unset".
+- Drift parser failures are loud (M8): a broken frontmatter-parser
+  import now aborts the scan with RuntimeError (run_audit records
+  `state:failed`) instead of silently reclassifying every skill
+  fleet-wide as ownerless with zero logging; a single skill's parse
+  failure degrades that one skill only, with a warning naming the file.
+
+### QA gate integrity
+
+- Suite runs once (M13): the gate header embedded a full pytest run in
+  echo's command substitution — echo's exit status hid that run's
+  failure under `set -e`, and the suite ran twice. One run, fatal
+  status.
+- Fingerprint names the tested core (M14): the core fingerprint now
+  uses conftest's resolution (`SORE_CORE_ROOT` → home default); the
+  orphaned `HERMES_CORE` var + venv-dir fallback could fingerprint a
+  checkout the tests never ran against (observed live: fingerprint
+  said 03fee43ca3 while the suite ran pinned 3e09e5a15f).
+
+### Minors
+
+- Unparseable config warns (policy): core's `load_config` never raises
+  on broken YAML (serves defaults), so a corrupt config that says
+  `enabled: false` silently re-ENABLED routing. Degrade-to-defaults is
+  kept (a typo must not freeze mutations) but now logs a loud warning
+  naming the file; a merely-absent key stays silent (documented
+  default-ON divergence).
+- Containment-skip warning rate-limited (drift): the bounded
+  `_skip_warns` list never gated the logging — every symlinked/escaping
+  skill path logged a warning per scan. Now once per 60s window.
+
+### Remaining OCR minors (v0.2.1 expansion — closes the report)
+
+Grouped remediation of the triaged MINOR section; posture consistent
+with the 2026-09-19 fail-closed ruling throughout (A/B/D below).
+
+**Enforcement/engine integrity** — silent degradation of the index
+backing the mutation gate is no longer silent: `_within_current_fleet` /
+`_profile_roots` resolution failures log (containment still fails
+closed, but a shrunk root set is diagnosable); `lookup`'s stale-pop is
+compare-and-delete so a drift merge landing mid-lookup can never delete
+a fresh entry (the gate would then pass an existing skill's mutation
+ungated); the drift→index build resolves duplicate skill names
+deterministically (first-seen wins — default home first, matching
+`build_index_from_scan`) with a collision warning instead of
+lexicographic-last silently winning; `_skills_in` applies ONE symlink
+policy (no admitted-then-dropped branch, no spurious containment
+warnings); `skill_owner_audit` rejects unknown actions instead of
+falling through to a full persistent scan; the hoarding body-marker
+regex is derived from `JUSTIFICATION_KEYS`.
+
+**Ledger integrity (M5 family)** — `load→mutate→save` under a module
+lock (a stale upsert save can no longer clobber a concurrent
+resolution); `save_findings` validates every record through `_valid()`
+before disk (persist-then-lose eliminated); `upsert_findings` stamps
+`status` itself; `update_status` enforces the status vocabulary
+(`'RESOLVED'`-style typos rejected instead of making findings
+invisible + silently reverted by the next scan).
+
+**Frontmatter fallback parser (all three PROBED bugs fixed + tests)** —
+`hermes:` is honored only under `metadata:` (a `defaults:` block can no
+longer donate an owner); quoted values lose their quotes; a closing
+fence at EOF without a trailing newline no longer misses the owner.
+ImportError (expected degraded env, quiet) is separated from real parse
+errors (logged); `resolve_owner_identity` ImportError names the
+environment failure instead of reading like an owner rejection.
+
+**routed_create tool contract (M1 family)** — exceptions inside (or
+before entering) the override window return a JSON error object (the
+tool contract is "returns JSON string"); a failed override reset is
+logged loudly; `_active_profile`/`_profile_exists` log swallowed
+exceptions; the raw `strip().lower()` normalization guess is replaced
+with deny-on-unresolvable.
+
+**home_override residuals (M4/M7 module)** — a failed token reset logs
+and clears the override outright (no silent process-global leak);
+`_engine_call` logs every failure branch.
+
+**Dashboard API + renderer** — `_broadcast` schedules each socket on
+its own loop ((loop, sock) pairs, no cross-product); the cold-start
+fleet scan runs outside `_STATE_LOCK` (get_map/get_map_detail no longer
+stall the whole dashboard); `_to_ms` converts numeric strings like
+numbers (PROBED: epoch-seconds strings rendered Jan-1970); FAILED audit
+runs stamp no `last_scan_ts`, and a failed sibling run can no longer
+permanently suppress `last_audit_ts`; the dead `_mint_ws_ticket`
+plumbing is deleted (it contradicted the README's query-string promise)
+— standalone `?ticket=` fails closed, gated host mode defers to the
+host's canonical ticket gate, README aligned; the desktop plugin tears
+down its `ctx.socket` subscription in `onDispose` (SDK disposer).
+
+**Repo/test hygiene** — CI least-privilege (permissions, concurrency,
+timeouts); `.gitignore` secrets patterns; hermetic session token
+(hard-set); `qa/run_gates.sh` appends the SPEC-3-promised matrix row on
+green runs; the QA `core_commit` fixture skips (not errors) without
+git/core; dormancy epoch flips re-arm the log-once announcement.
+
+Deferred (documented, not fixed): `schemas.py` name/category pattern
+hardening — needs a core `skill_manage` contract check before
+tightening (out of scope here, tracked for v0.2.2+).
+
 ## [0.2.0] — 2026-09-19
 
 Pre-release repairs from the OCR full-repo review at v0.2.0-RC (d1659fb),

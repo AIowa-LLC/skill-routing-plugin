@@ -455,5 +455,19 @@ check(m.auditOutcome({ state: 'running' }).count === '?', "auditOutcome: count f
   check(done.state === 'done' && done.findings_count === 7, 'pollRun: terminal done passes through', JSON.stringify(done))
 }
 
+// v0.2.1 OCR minor (F6): the ctx.socket subscription must be torn down in
+// onDispose — the SDK contract documents socket() returning a disposer.
+// Static source checks (comment-stripped): the disposer is captured and
+// invoked inside onDispose.
+console.log('\n== F6: live-push subscription teardown ==')
+check(
+  /disposeSocket\s*=\s*ctx\.socket\(/.test(noComments),
+  'socket() disposer is captured (disposeSocket = ctx.socket(...))'
+)
+check(
+  /onDispose\(\s*\(\)\s*=>\s*\{[^}]*disposeSocket\(\)/.test(noComments.replace(/\n/g, ' ')),
+  'onDispose invokes the socket disposer'
+)
+
 console.log('\n' + (failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)'))
 process.exit(failures === 0 ? 0 : 1)

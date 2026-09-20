@@ -12,7 +12,9 @@ import re
 from typing import Any, Dict, Optional
 
 # Accepted justification keys, checked in metadata.hermes.global_justification
-# or a body comment marker. Human-readable values are free text.
+# or a body marker. ONE source of truth: the set defines the vocabulary and
+# the body-marker alternation is DERIVED from it (sorted for a stable
+# pattern) — the two definitions can no longer diverge (OCR minor).
 JUSTIFICATION_KEYS = {
     "control-plane",
     "shared-primitive",
@@ -20,8 +22,9 @@ JUSTIFICATION_KEYS = {
 }
 
 _BODY_MARKER = re.compile(
-    r"global[- ]justification:\s*(control-plane|shared-primitive|"
-    r"verified-structural-dependency)(?![-\w])",
+    r"global[- ]justification:\s*("
+    + "|".join(sorted(JUSTIFICATION_KEYS))
+    + r")(?![\-\w])",
     re.IGNORECASE,
 )
 

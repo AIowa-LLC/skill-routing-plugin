@@ -144,3 +144,30 @@ def test_installed_core_lacks_pr_symbols(core_root):
     smt = importlib.import_module("tools.skill_manager_tool")
     assert not hasattr(smt, "_skill_owner_routing_policy")
     assert not hasattr(smt, "_create_skill_with_owner_routing")
+
+
+# -- QA gate script invariants (OCR M13/M14) -------------------------------
+
+
+def test_run_gates_runs_suite_once(core_root):
+    """M13: the suite must run exactly once — the old header embedded a
+    full pytest run inside echo's command substitution, whose exit status
+    hid that run's failure under set -e before the suite ran again."""
+    script = (Path(__file__).resolve().parents[2] / "qa" / "run_gates.sh").read_text()
+    # exactly one pytest invocation, and it is NOT inside a substitution
+    assert '"$VENV_PY" -m pytest' in script
+    assert script.count('"$VENV_PY" -m pytest') == 1
+    assert '$("$VENV_PY" -m pytest' not in script
+
+
+def test_run_gates_fingerprint_matches_conftest_core_resolution(core_root):
+    """M14: the evidence fingerprint must resolve the core the same way
+    the test suite does (SORE_CORE_ROOT → home default) — the old orphan
+    env var + venv-dir fallback fingerprinted a checkout the tests never
+    ran against."""
+    script = (Path(__file__).resolve().parents[2] / "qa" / "run_gates.sh").read_text()
+    # the orphaned env var is gone everywhere
+    assert "HERMES_CORE" not in script
+    # fingerprint resolution is byte-identical to conftest's core order
+    assert 'CORE_DIR="${SORE_CORE_ROOT:-$HOME/.hermes/hermes-agent}"' in script
+    assert 'CORE_COMMIT="$(git -C "${CORE_DIR}" rev-parse --short HEAD)"' in script

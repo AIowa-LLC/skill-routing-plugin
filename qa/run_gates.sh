@@ -31,7 +31,13 @@ TARGETS="${*:-tests/}"
 
 cd "$REPO"
 
-CORE_COMMIT="$(git -C "${HERMES_CORE:-$(dirname "$(dirname "$VENV_PY")")}" rev-parse --short HEAD)"
+# M14: the fingerprint must name the core the suite ACTUALLY ran against.
+# conftest resolves the core as SORE_CORE_ROOT → ~/.hermes/hermes-agent;
+# the fingerprint uses the same resolution. The old code read an env var
+# nothing else in the project used and fell back to the venv's parent
+# dir, which could fingerprint a checkout the tests never touched.
+CORE_DIR="${SORE_CORE_ROOT:-$HOME/.hermes/hermes-agent}"
+CORE_COMMIT="$(git -C "${CORE_DIR}" rev-parse --short HEAD)"
 PLUGIN_COMMIT="$(git rev-parse --short HEAD)"
 PLUGIN_DIRTY="$(git status --porcelain | wc -l)"
 OS_ID="$(uname -sr)"
@@ -41,8 +47,27 @@ echo "== skill-owner-routing QA gates =="
 echo "core:      ${CORE_COMMIT}"
 echo "plugin:    ${PLUGIN_COMMIT} (dirty files: ${PLUGIN_DIRTY})"
 echo "platform:  ${OS_ID} / Python ${PY_VER}"
-echo "== $("$VENV_PY" -m pytest $TARGETS --tb=short -q) =="
-"$VENV_PY" -m pytest $TARGETS --tb=short -q
+
+# SPEC-3 §Evidence & process: results are APPENDED to qa/matrix.md per run
+# with the environment fingerprint. This used to be stdout-only — the spec
+# promised the append and Run-5 evidence had to be assembled by hand.
+# Appended AFTER a fully green run (a failed run leaves no false PASS row).
+MATRIX="qa/matrix.md"
+GATES_RUN_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+echo "== pytest: ${TARGETS} =="
+# M13: run the suite ONCE, keep the failure fatal AND its diagnostics
+# visible. The old header embedded a full pytest run in a command
+# substitution (echo "== $(...pytest...) ==") and echo's exit status hid
+# that run's failure under set -e — then line two ran the whole suite
+# again. Capturing into a variable would repeat the lost-diagnostics
+# half of that bug (set -e dies before the echo), so this streams
+# through tee: output is live, pipefail keeps pytest's status fatal,
+# and the matrix tail is read from the tee'd copy only on success.
+TEST_OUT="$(mktemp)"
+trap 'rm -f "${TEST_OUT}" "${CONTRACT_OUT:-}"' EXIT
+"$VENV_PY" -m pytest $TARGETS --tb=short -q 2>&1 | tee "${TEST_OUT}"
+SUITE_TAIL="$(tail -1 "${TEST_OUT}")"
 
 # -- Desktop plugin contract (SPEC-2 surface) --------------------------------
 # Fail-closed: a missing node runtime or missing test file is a gate FAILURE,
@@ -57,4 +82,21 @@ if [ ! -f "$CONTRACT_TEST" ]; then
     echo "FAIL  ${CONTRACT_TEST} not found — desktop contract cannot run (fail-closed)"
     exit 1
 fi
-node "$CONTRACT_TEST"
+CONTRACT_OUT="$(mktemp)"
+node "$CONTRACT_TEST" 2>&1 | tee "${CONTRACT_OUT}"
+CONTRACT_TAIL="$(tail -1 "${CONTRACT_OUT}")"
+
+# -- Matrix append (SPEC-3 §Evidence & process) ------------------------------
+# Reached ONLY on a fully green run (set -e died above otherwise): append
+# the fingerprinted PASS row the spec promises. No FAIL row is ever written
+# by the runner itself — a failed run's evidence is its terminal output.
+{
+    echo ""
+    echo "## Gate run ${GATES_RUN_AT} — plugin ${PLUGIN_COMMIT} (auto-appended)"
+    echo ""
+    echo "- core: \`${CORE_COMMIT}\` — plugin: \`${PLUGIN_COMMIT}\` (dirty: ${PLUGIN_DIRTY}) — ${OS_ID} / Python ${PY_VER}"
+    echo "- suite: \`${SUITE_TAIL}\`"
+    echo "- desktop contract: \`${CONTRACT_TAIL}\`"
+    echo "- verdict: **PASS** (auto-appended by qa/run_gates.sh; failures never append)"
+} >> "$MATRIX"
+echo "== matrix row appended to ${MATRIX} =="

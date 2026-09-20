@@ -50,13 +50,47 @@ def scan() -> Dict[str, Any]:
     counts = ledger_mod.upsert_findings(findings)
     from .index import update_index
 
-    update_index({e["skill"]: e["path"] for e in catalog})
+    update_index(_index_entries(catalog))
     return {
         "run_id": run_id,
         "scanned": scanned,
         "findings": findings,
         "counts": counts,
     }
+
+
+def _index_entries(catalog: List[Dict[str, Any]]) -> Dict[str, str]:
+    """name -> SKILL.md path for the mutation index, deterministic on
+    duplicate names.
+
+    A fleet can hold the same skill name globally AND in a profile (the
+    duplicate/hoarding finding flags it). The plain dict comprehension
+    used here collapsed those order-dependently — lexicographically-last
+    profile copy silently won, global copy dropped — backing the
+    mutation-gate target resolution with an arbitrary choice. First
+    occurrence wins instead (the homes order is deterministic: default
+    first, then sorted profiles — same preference build_index_from_scan's
+    ``setdefault`` already encodes), and every collision is logged.
+    """
+    entries: Dict[str, str] = {}
+    dups: Dict[str, str] = {}
+    for entry in catalog:
+        name, path = entry["skill"], entry["path"]
+        if name in entries:
+            if entries[name] != path:
+                dups[name] = path
+            continue
+        entries[name] = path
+    for name, path in dups.items():
+        logger.warning(
+            "skill-owner-routing: skill name %r exists in multiple homes "
+            "(indexing %r; also seen at %r — duplicate/hoarding finding "
+            "flags the twin)",
+            name,
+            entries[name],
+            path,
+        )
+    return entries
 
 
 def declared_skill_owner_from(frontmatter: Dict[str, Any]) -> Optional[str]:
@@ -134,8 +168,18 @@ def _skills_in(home: Path) -> List[Tuple[str, Path]]:
         try:
             if not child.is_dir() or child.name.startswith("."):
                 continue
-            if child.is_symlink() and not _resolves_within(child, home):
-                continue  # alias to another home's skill — counted there, not here
+            if child.is_symlink():
+                # M11 containment (see _contained_skill_md): a SKILL.md
+                # reached through ANY symlink component is never indexed.
+                # The old guard here only skipped symlinks resolving
+                # OUTSIDE the home — within-home symlinked dirs passed,
+                # then _contained_skill_md rejected them two lines later:
+                # an admitted-but-guaranteed-dropped branch (plus a
+                # spurious containment warning per alias). One policy:
+                # symlinked skill dirs are skipped outright, wherever
+                # they point; the physical copy is scanned at its
+                # canonical home.
+                continue
             skill_md = child / "SKILL.md"
             if skill_md.is_file():
                 if _contained_skill_md(home, skill_md):
@@ -150,19 +194,21 @@ def _skills_in(home: Path) -> List[Tuple[str, Path]]:
             try:
                 if not grandchild.is_dir():
                     continue
-                if grandchild.is_symlink() and not _resolves_within(grandchild, home):
-                    continue  # alias to another home's skill
+                if grandchild.is_symlink():
+                    continue  # M11: same symlink-component rule as above
                 nested = grandchild / "SKILL.md"
                 if nested.is_file():
                     if _contained_skill_md(home, nested):
                         found.append((grandchild.name, nested))
             except OSError:
-                continue  # unreadable/undiscoverable — skip this grandchild only
+                continue  # unreadable — skip this grandchild only
     return found
 
 
 _SKIP_WARN_CAP = 32
+_SKIP_WARN_RATE = 60.0  # seconds between repeat containment warnings
 _skip_warns: list = []
+_skip_warn_last = [0.0]  # monotonic timestamp of the last emitted warning
 
 
 def _contained_skill_md(home: Path, skill_md: Path) -> bool:
@@ -193,20 +239,29 @@ def _contained_skill_md(home: Path, skill_md: Path) -> bool:
 
 
 def _warn_skip() -> None:
+    """Rate-limited containment warning (OCR minor: log flood).
+
+    A fleet with many symlinked/escaping skill paths fires this per skill
+    per scan — the old code logged every call (the _skip_warns list was
+    dead state, never gating anything). The list is kept for diagnostics;
+    the log is rate-limited to once per _SKIP_WARN_RATE window, and the
+    first call in a window reports how many were suppressed since the
+    last emission.
+    """
     import time as _time
 
-    _skip_warns.append(_time.monotonic())
+    now = _time.monotonic()
+    _skip_warns.append(now)
     del _skip_warns[:-_SKIP_WARN_CAP]
+    if now - _skip_warn_last[0] < _SKIP_WARN_RATE:
+        return
+    _skip_warn_last[0] = now
     logger.warning(
-        "skill-owner-routing: skill path failed containment validation; skipped"
+        "skill-owner-routing: skill path(s) failed containment validation "
+        "and were skipped (%d in the last window); run with engine logs "
+        "enabled for the full list",
+        len(_skip_warns),
     )
-
-
-def _resolves_within(path: Path, root: Path) -> bool:
-    try:
-        return path.resolve().is_relative_to(root.resolve())
-    except OSError:
-        return False
 
 
 def _read(skill_md: Path) -> Tuple[Dict[str, Any], str]:
@@ -214,14 +269,37 @@ def _read(skill_md: Path) -> Tuple[Dict[str, Any], str]:
         content = skill_md.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}, ""
+    # M8: the parser import is environment health, the parse call is
+    # per-skill content. They must not share an except — a broken parser
+    # import used to degrade EVERY skill to empty frontmatter with zero
+    # logging: the whole fleet silently reclassified ownerless (drift
+    # findings suppressed, spurious hoarding lints) while run_audit still
+    # reported ok:true. An unparseable parser is a watchdog malfunction:
+    # fail the scan loudly. A single unparseable SKILL.md degrades that
+    # one skill only, with a logged warning naming the file.
     try:
         from agent.skill_utils import parse_frontmatter
-
+    except Exception as exc:
+        logger.exception(
+            "skill-owner-routing: frontmatter parser unavailable — "
+            "drift scan cannot classify ownership and must not report "
+            "official-looking results"
+        )
+        raise RuntimeError(
+            "skill-owner-routing drift scan: frontmatter parser "
+            f"unavailable ({type(exc).__name__}) — aborting scan"
+        ) from exc
+    try:
         frontmatter, body = parse_frontmatter(content)
         if not isinstance(frontmatter, dict):
             frontmatter = {}
         return frontmatter, body
     except Exception:
+        logger.warning(
+            "skill-owner-routing: frontmatter parse failed for %s; "
+            "treating this skill as metadata-less for this scan",
+            skill_md,
+        )
         return {}, content
 
 

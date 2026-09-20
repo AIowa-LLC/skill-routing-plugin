@@ -19,8 +19,11 @@ config file.
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any, Dict
+
+logger = logging.getLogger(__name__)
 
 # module_name -> (mtime_ns, size, policy_dict)
 _CACHE: Dict[str, Any] = {}
@@ -60,11 +63,58 @@ def read_policy() -> Dict[str, Any]:
         cached = _CACHE.get(key)
         if cached is not None and cached[0] == fingerprint:
             return dict(cached[1])
-
-    policy = _load(home, path)
-    with _LOCK:
+        # Load UNDER the lock (double-checked locking, OCR M4): _load()
+        # mutates process-global home-override state (set/reset token, and
+        # a process-global env fallback on cores without the token
+        # machinery) — concurrent dashboard threadpool readers interleaving
+        # set/reset outside a lock can read the wrong home (SPEC-1) or
+        # leave the override stuck on. Loads are rare (cache miss only),
+        # so serializing them is free.
+        policy = _load(home, path)
         _CACHE[key] = (fingerprint, dict(policy))
-    return policy
+        return policy
+
+
+def _warn_if_unparseable(path) -> None:
+    """Loud warning when config.yaml exists but is not parseable YAML.
+
+    Only called on the raw-is-None degrade path, so a normal absent key
+    never warns (that is the documented default-ON divergence). Uses the
+    raw file, not core's load_config — core never raises on broken YAML
+    (serves defaults), which is exactly why the caller can't tell.
+    """
+    import yaml
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            parsed = yaml.safe_load(fh)
+        if not isinstance(parsed, dict):
+            logger.warning(
+                "skill-owner-routing: %s is not a YAML mapping; the "
+                "skills.owner_routing policy cannot be read from it. "
+                "Applying default-ON policy — an explicit disable in this "
+                "file is NOT in effect. Fix the config file.",
+                path,
+            )
+    except FileNotFoundError:
+        pass  # vanished between stat and open — next read treats as absent
+    except OSError:
+        logger.warning(
+            "skill-owner-routing: %s is unreadable; the "
+            "skills.owner_routing policy cannot be read from it. "
+            "Applying default-ON policy — an explicit disable in this "
+            "file is NOT in effect. Fix the config file permissions.",
+            path,
+        )
+    except yaml.YAMLError as exc:
+        logger.warning(
+            "skill-owner-routing: %s failed to parse (%s); the "
+            "skills.owner_routing policy cannot be read from it. "
+            "Applying default-ON policy — an explicit disable in this "
+            "file is NOT in effect. Fix the config file.",
+            path,
+            type(exc).__name__,
+        )
 
 
 def _load(home, path) -> Dict[str, Any]:
@@ -87,6 +137,16 @@ def _load(home, path) -> Dict[str, Any]:
         return defaults
 
     if raw is None:
+        # Minor (OCR policy.py:86-87 family): "key absent from a parseable
+        # file" and "config exists but cannot be honored" are different
+        # situations. Core's load_config never raises on broken YAML — it
+        # serves defaults — so a corrupt file that SAYS `enabled: false`
+        # would silently re-ENABLE routing (default-ON divergence applied
+        # to a file the user did edit). Degrade-to-defaults posture stays
+        # (a config typo must not freeze all skill mutations), but never
+        # silently: an unparseable config gets a loud warning naming it.
+        if path.exists():
+            _warn_if_unparseable(path)
         return defaults  # key absent → ENABLED (divergence, see module doc)
     if isinstance(raw, bool):
         return {**defaults, "enabled": raw}

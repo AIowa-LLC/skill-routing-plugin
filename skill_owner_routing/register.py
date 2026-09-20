@@ -11,6 +11,18 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Runtime mirror of SKILL_OWNER_AUDIT_SCHEMA's action enum — read FROM the
+# schema so the vocabulary cannot drift between contract and enforcement.
+def _audit_actions() -> set:
+    from .schemas import SKILL_OWNER_AUDIT_SCHEMA
+
+    return set(
+        SKILL_OWNER_AUDIT_SCHEMA["input_schema"]["properties"]["action"]["enum"]
+    )
+
+
+AUDIT_ACTIONS = _audit_actions()
+
 
 def register(ctx: Any) -> None:
     """Register the enforcement surface with Hermes."""
@@ -39,6 +51,23 @@ def register(ctx: Any) -> None:
         from . import drift, ledger
 
         action = str(args.get("action") or "scan")
+        if action not in AUDIT_ACTIONS:
+            # OCR minor: any unknown action (typo, case variant like
+            # 'Scan' or 'List') used to fall through to run_audit() — a
+            # FULL fleet scan with persistent side effects (ledger upsert
+            # + index rewrite). The schema enum never reached runtime
+            # validation. Reject unknown actions with the valid set; no
+            # scan happens.
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        f"Unknown action {action!r}. Valid actions: "
+                        f"{sorted(AUDIT_ACTIONS)}."
+                    ),
+                },
+                ensure_ascii=False,
+            )
         if action == "list":
             try:
                 findings = ledger.load_findings()

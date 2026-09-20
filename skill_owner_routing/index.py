@@ -5,9 +5,12 @@ Copyright (c) 2026 skill-owner-routing contributors. MIT licensed.
 
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 _INDEX: Dict[str, str] = {}  # skill name -> absolute SKILL.md path
 _LOCK = threading.Lock()
@@ -54,8 +57,16 @@ def lookup(name: str) -> Optional[Path]:
         with _LOCK:
             _INDEX[name] = str(found)
         return found
+    # Compare-and-delete, never a blind pop: a drift scan's update_index /
+    # merge_entries can land a fresh entry for this name between our scan
+    # and this pop (check-then-act race). Deleting it would make the gate
+    # treat an existing skill as unresolvable — passing that mutation
+    # call ungated. Only drop the entry when it is still the stale value
+    # this lookup observed (or absent).
     with _LOCK:
-        _INDEX.pop(name, None)  # drop stale entries on confirmed miss
+        current = _INDEX.get(name)
+        if current is None or current == indexed:
+            _INDEX.pop(name, None)
     return None
 
 
@@ -76,13 +87,28 @@ def _is_plain_skill_name(name: str) -> bool:
 
 
 def _within_current_fleet(candidate: Path) -> bool:
-    """True when the path sits under the fleet root the index was built for."""
+    """True when the path sits under the fleet root the index was built for.
+
+    A resolution failure here must be visible (2026-09-19 fail-closed
+    ruling, same posture as the M1/M2 gate fixes): the old silent
+    ``return False`` shrank the trusted root set with zero diagnostics,
+    degrading the mutation gate toward pass-through while every caller
+    just saw "not in fleet". Containment still fails closed — False on
+    failure — but the failure is logged so a mis-resolving fleet is
+    diagnosable instead of a silent policy shift.
+    """
     try:
         from .common import fleet_default_home
 
         root = fleet_default_home().resolve()
         return candidate.resolve().is_relative_to(root)
     except Exception:
+        logger.exception(
+            "skill-owner-routing: could not resolve the current fleet root "
+            "to validate %r against it — containment failing closed "
+            "(treated as outside the fleet)",
+            str(candidate),
+        )
         return False
 
 
@@ -92,7 +118,15 @@ def clear() -> None:
 
 
 def _profile_roots() -> list:
-    """All candidate skills roots: current home's + DEFAULT root's profiles."""
+    """All candidate skills roots: current home's + DEFAULT root's profiles.
+
+    Resolution failures are logged, never silent (2026-09-19 fail-closed
+    ruling): a missing root silently shrinks the scan surface — the gate
+    then treats every skill outside the survivors as unresolvable — so
+    each dropped root is named in the log. Partial roots are still
+    returned (the bounded scan remains useful); the point is that the
+    degradation is diagnosable, not invisible.
+    """
     roots = []
     seen = set()
 
@@ -107,7 +141,11 @@ def _profile_roots() -> list:
 
         add_home(Path(get_hermes_home()))
     except Exception:
-        pass
+        logger.exception(
+            "skill-owner-routing: could not resolve the current home for "
+            "the bounded scan — that skills root is EXCLUDED (scan "
+            "surface shrunk)"
+        )
     try:
         from .common import fleet_default_home
 
@@ -119,7 +157,11 @@ def _profile_roots() -> list:
                 if child.is_dir():
                     add_home(child)
     except Exception:
-        pass
+        logger.exception(
+            "skill-owner-routing: could not resolve the DEFAULT fleet home "
+            "or its profiles for the bounded scan — those skills roots are "
+            "EXCLUDED (scan surface shrunk)"
+        )
     return roots
 
 
