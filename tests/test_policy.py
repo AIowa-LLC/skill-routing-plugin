@@ -142,3 +142,45 @@ class TestConcurrentReads:
         assert len(calls) == 1, f"expected exactly one load, got {len(calls)}"
         assert len({id(r) for r in results.values()}) == 4  # independent dicts
         assert all(r["enabled"] is True for r in results.values())
+
+
+class TestUnparseableConfigWarns:
+    """Minor (policy.py:86-87 family) — a config that exists but cannot be
+    honored must never degrade to defaults SILENTLY. Core's load_config
+    never raises on broken YAML (it serves defaults), so a corrupt file
+    that says ``enabled: false`` used to silently re-ENABLE routing. The
+    degrade-to-defaults posture stays (a typo must not freeze mutations)
+    but an unparseable config now logs a loud warning naming the file;
+    a merely-absent key stays silent (documented default-ON divergence).
+    """
+
+    def test_broken_yaml_that_says_disabled_warns(self, fleet, caplog):
+        import logging
+
+        fleet["root"].joinpath("config.yaml").write_text(
+            "skills:\n"
+            "  owner_routing:\n"
+            "    enabled: false\n"
+            "  other: [unclosed\n",
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="skill_owner_routing.policy"):
+            pol = _read_policy()
+        assert pol["enabled"] is True  # degrade-to-defaults posture kept
+        assert any(
+            "NOT in effect" in r.getMessage() and "config.yaml" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_absent_key_stays_silent(self, fleet, caplog):
+        import logging
+
+        # config exists, parses, key absent — the documented divergence
+        # must not cry wolf on every standard install.
+        fleet["root"].joinpath("config.yaml").write_text(
+            "model: grok\n", encoding="utf-8"
+        )
+        with caplog.at_level(logging.WARNING, logger="skill_owner_routing.policy"):
+            pol = _read_policy()
+        assert pol["enabled"] is True
+        assert not [r for r in caplog.records if "NOT in effect" in r.getMessage()]
