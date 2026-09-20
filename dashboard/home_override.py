@@ -17,10 +17,13 @@ mtime caches on exit so a later real-home read can't serve stale temp data.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -34,6 +37,10 @@ def _home_override(home: Path) -> Iterator[None]:
 
         token = set_hermes_home_override(home)
     except Exception:
+        logger.exception(
+            "skill-owner-routing: home-override token machinery unavailable "
+            "— falling back to the HERMES_HOME env var"
+        )
         token = None
     prev_env = os.environ.get("HERMES_HOME")
     if token is None:
@@ -51,7 +58,25 @@ def _home_override(home: Path) -> Iterator[None]:
             try:
                 reset_hermes_home_override(token)
             except Exception:
-                pass
+                # The process-global override is still in force after a
+                # failed reset — every subsequent engine read in this
+                # process resolves the WRONG home. Log loudly; best-effort
+                # cleanup: clear the override outright (a stray None-reset
+                # is strictly safer than a stuck override).
+                logger.exception(
+                    "skill-owner-routing: FAILED to reset the home-override "
+                    "token — clearing the override outright to avoid a "
+                    "stuck wrong-home override"
+                )
+                try:
+                    from hermes_constants import set_hermes_home_override
+
+                    set_hermes_home_override(None)
+                except Exception:
+                    logger.exception(
+                        "skill-owner-routing: override is STUCK — subsequent "
+                        "engine reads may resolve the wrong home"
+                    )
         else:
             # Restore the pre-entry env state exactly — including
             # "unset" (prev_env None), which the old code never touched.
@@ -64,19 +89,46 @@ def _home_override(home: Path) -> Iterator[None]:
 
             reset_caches()
         except Exception:
-            pass
+            logger.exception(
+                "skill-owner-routing: engine cache reset failed after the "
+                "home override — later reads may serve stale temp-fleet "
+                "data until the next reset_caches()"
+            )
 
 
 def _engine_call(module, attr: str, home: Path, submodule: str = ""):
-    """Run engine[<submodule>].<attr>() with the home pinned; None on failure."""
+    """Run engine[<submodule>].<attr>() with the home pinned; None on failure.
+
+    Every None-returning branch logs WHY (OCR minor): a blank dashboard
+    caused by a missing attr, an import failure, or a raising engine call
+    was previously indistinguishable in the field.
+    """
     if module is None:
         return None
     target = module.get(submodule) if submodule else module
-    fn = getattr(target, attr, None) if target is not None else None
+    if target is None:
+        logger.error(
+            "skill-owner-routing: engine has no %r submodule — cannot call "
+            "%r",
+            submodule,
+            attr,
+        )
+        return None
+    fn = getattr(target, attr, None)
     if not callable(fn):
+        logger.error(
+            "skill-owner-routing: engine %r has no callable %r",
+            submodule or "module",
+            attr,
+        )
         return None
     try:
         with _home_override(home):
             return fn()
     except Exception:
+        logger.exception(
+            "skill-owner-routing: engine call %s.%s() raised",
+            submodule or "engine",
+            attr,
+        )
         return None
