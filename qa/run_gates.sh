@@ -41,7 +41,11 @@ echo "== skill-owner-routing QA gates =="
 echo "core:      ${CORE_COMMIT}"
 echo "plugin:    ${PLUGIN_COMMIT} (dirty files: ${PLUGIN_DIRTY})"
 echo "platform:  ${OS_ID} / Python ${PY_VER}"
-echo "== $("$VENV_PY" -m pytest $TARGETS --tb=short -q) =="
+echo "== pytest: ${TARGETS} =="
+# M13: run the suite ONCE. The old header embedded a full pytest run in a
+# command substitution (echo "== $(...pytest...) ==") and echo's exit
+# status hid that first run's failure under set -e — then line two ran
+# the whole suite again. One run, its own exit status is fatal.
 "$VENV_PY" -m pytest $TARGETS --tb=short -q
 
 # -- Desktop plugin contract (SPEC-2 surface) --------------------------------
