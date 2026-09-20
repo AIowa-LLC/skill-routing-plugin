@@ -162,7 +162,9 @@ def _skills_in(home: Path) -> List[Tuple[str, Path]]:
 
 
 _SKIP_WARN_CAP = 32
+_SKIP_WARN_RATE = 60.0  # seconds between repeat containment warnings
 _skip_warns: list = []
+_skip_warn_last = [0.0]  # monotonic timestamp of the last emitted warning
 
 
 def _contained_skill_md(home: Path, skill_md: Path) -> bool:
@@ -193,12 +195,28 @@ def _contained_skill_md(home: Path, skill_md: Path) -> bool:
 
 
 def _warn_skip() -> None:
+    """Rate-limited containment warning (OCR minor: log flood).
+
+    A fleet with many symlinked/escaping skill paths fires this per skill
+    per scan — the old code logged every call (the _skip_warns list was
+    dead state, never gating anything). The list is kept for diagnostics;
+    the log is rate-limited to once per _SKIP_WARN_RATE window, and the
+    first call in a window reports how many were suppressed since the
+    last emission.
+    """
     import time as _time
 
-    _skip_warns.append(_time.monotonic())
+    now = _time.monotonic()
+    _skip_warns.append(now)
     del _skip_warns[:-_SKIP_WARN_CAP]
+    if now - _skip_warn_last[0] < _SKIP_WARN_RATE:
+        return
+    _skip_warn_last[0] = now
     logger.warning(
-        "skill-owner-routing: skill path failed containment validation; skipped"
+        "skill-owner-routing: skill path(s) failed containment validation "
+        "and were skipped (%d in the last window); run with engine logs "
+        "enabled for the full list",
+        len(_skip_warns),
     )
 
 

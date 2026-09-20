@@ -526,3 +526,41 @@ class TestParserFailureLoud:
         )
         assert any(f["skill"] == "good-skill" and f["kind"] == "drifted"
                    for f in result["findings"])
+
+
+class TestContainmentWarningRateLimited:
+    """OCR minor (drift.py:195-202) — _warn_skip's "bounded warning" list
+    never gated the logging: every containment skip logged, flooding on a
+    fleet with many symlinked/escaping paths. The warning is now
+    rate-limited; the bounded list survives for diagnostics."""
+
+    def test_repeated_skips_log_once_per_window(self, caplog):
+        import logging
+
+        from skill_owner_routing import drift
+
+        drift._skip_warn_last[0] = 0.0  # window open
+        with caplog.at_level(logging.WARNING, logger="skill_owner_routing.drift"):
+            drift._warn_skip()
+            drift._warn_skip()
+            drift._warn_skip()
+        warnings = [r for r in caplog.records if "containment" in r.getMessage()]
+        assert len(warnings) == 1  # flood gated: 3 skips, 1 log line
+
+    def test_new_window_logs_again(self, caplog, monkeypatch):
+        import logging
+
+        from skill_owner_routing import drift
+
+        drift._skip_warn_last[0] = 0.0
+        with caplog.at_level(logging.WARNING, logger="skill_owner_routing.drift"):
+            drift._warn_skip()
+        assert len([r for r in caplog.records if "containment" in r.getMessage()]) == 1
+        # jump past the window
+        monkeypatch.setattr(drift._time_marker, "monotonic", lambda: 10_000.0) if hasattr(
+            drift, "_time_marker"
+        ) else None
+        drift._skip_warn_last[0] = -drift._SKIP_WARN_RATE  # force window elapsed
+        with caplog.at_level(logging.WARNING, logger="skill_owner_routing.drift"):
+            drift._warn_skip()
+        assert len([r for r in caplog.records if "containment" in r.getMessage()]) == 2
