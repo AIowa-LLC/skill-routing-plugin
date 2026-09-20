@@ -158,3 +158,16 @@ def test_run_gates_runs_suite_once(core_root):
     assert '"$VENV_PY" -m pytest' in script
     assert script.count('"$VENV_PY" -m pytest') == 1
     assert '$("$VENV_PY" -m pytest' not in script
+
+
+def test_run_gates_fingerprint_matches_conftest_core_resolution(core_root):
+    """M14: the evidence fingerprint must resolve the core the same way
+    the test suite does (SORE_CORE_ROOT → home default) — the old orphan
+    env var + venv-dir fallback fingerprinted a checkout the tests never
+    ran against."""
+    script = (Path(__file__).resolve().parents[2] / "qa" / "run_gates.sh").read_text()
+    # the orphaned env var is gone everywhere
+    assert "HERMES_CORE" not in script
+    # fingerprint resolution is byte-identical to conftest's core order
+    assert 'CORE_DIR="${SORE_CORE_ROOT:-$HOME/.hermes/hermes-agent}"' in script
+    assert 'CORE_COMMIT="$(git -C "${CORE_DIR}" rev-parse --short HEAD)"' in script

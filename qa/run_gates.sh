@@ -31,7 +31,13 @@ TARGETS="${*:-tests/}"
 
 cd "$REPO"
 
-CORE_COMMIT="$(git -C "${HERMES_CORE:-$(dirname "$(dirname "$VENV_PY")")}" rev-parse --short HEAD)"
+# M14: the fingerprint must name the core the suite ACTUALLY ran against.
+# conftest resolves the core as SORE_CORE_ROOT → ~/.hermes/hermes-agent;
+# the fingerprint uses the same resolution. The old code read an env var
+# nothing else in the project used and fell back to the venv's parent
+# dir, which could fingerprint a checkout the tests never touched.
+CORE_DIR="${SORE_CORE_ROOT:-$HOME/.hermes/hermes-agent}"
+CORE_COMMIT="$(git -C "${CORE_DIR}" rev-parse --short HEAD)"
 PLUGIN_COMMIT="$(git rev-parse --short HEAD)"
 PLUGIN_DIRTY="$(git status --porcelain | wc -l)"
 OS_ID="$(uname -sr)"
