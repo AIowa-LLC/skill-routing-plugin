@@ -994,12 +994,18 @@ const plugin = {
       }
     ])
     // Live drift push (no-op on OAuth remotes — the poll above is the floor).
+    let disposeSocket = null
     if (ctx.socket) {
-      ctx.socket('/events', () => {
+      disposeSocket = ctx.socket('/events', () => {
         invalidateAll()
       })
     }
     ctx.onDispose(() => {
+      // Tear down the live-push subscription: the SDK's socket() returns a
+      // disposer (Desktop Plugin SDK contract). Without it a post-dispose
+      // broadcast fired invalidateAll() into a dead plugin — 'plugin rest
+      // not ready' refetch noise in the host logs.
+      if (typeof disposeSocket === 'function') disposeSocket()
       restRef = null
       storageRef = null
       i18nTRef = null

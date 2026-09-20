@@ -288,36 +288,40 @@ class TestWsOriginAuth:
 
     # -- standalone tickets -------------------------------------------------
 
-    def test_ticket_connects_and_is_single_use(self, sec_fleet):
-        ticket = plugin_api._mint_ws_ticket()
-        assert ticket
-        app = _app()
-        with TestClient(app) as client:
-            with client.websocket_connect(
-                f"{API}/events?ticket={ticket}", headers={"origin": "http://localhost"}
-            ):
-                pass
-        with TestClient(app) as client:
-            with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(
-                    f"{API}/events?ticket={ticket}", headers={"origin": "http://localhost"}
-                ):
-                    pass
+    # OCR minor (ticket plumbing): _mint_ws_ticket was dead code — no route
+    # minted tickets, so the single-use machinery was unreachable in
+    # production while the README promised query-strings are never used.
+    # Deleted. The pinned contract now: standalone mounts accept ONLY the
+    # configured session token; ?ticket= fails closed (nothing mints); in
+    # gated host mode the host's canonical gate owns tickets end-to-end.
 
-    def test_expired_ticket_rejected(self, sec_fleet):
-        ticket = plugin_api._mint_ws_ticket()
-        # force-expire it in the store
-        expires_at, info = plugin_api._WS_TICKETS[ticket]
-        plugin_api._WS_TICKETS[ticket] = (expires_at - 3600, info)
+    def test_standalone_ticket_never_authenticates(self, sec_fleet):
+        """No module-minted tickets exist — ?ticket= must fail closed."""
         with _client(_app()) as client:
             with pytest.raises(WebSocketDisconnect):
                 with client.websocket_connect(
-                    f"{API}/events?ticket={ticket}", headers={"origin": "http://localhost"}
+                    f"{API}/events?ticket={'x' * 43}",
+                    headers={"origin": "http://localhost"},
+                ):
+                    pass
+            with pytest.raises(WebSocketDisconnect):
+                # even a second attempt with the same value (single-use
+                # semantics are moot when nothing mints)
+                with client.websocket_connect(
+                    f"{API}/events?ticket={'x' * 43}",
+                    headers={"origin": "http://localhost"},
                 ):
                     pass
 
+    def test_module_mint_helper_is_gone(self, sec_fleet):
+        """The dead mint path is deleted, not merely unused."""
+        assert not hasattr(plugin_api, "_mint_ws_ticket")
+        assert not hasattr(plugin_api, "_consume_ws_ticket")
+        assert not hasattr(plugin_api, "_WS_TICKETS")
+
     def test_gated_host_mode_refuses_session_token(self, sec_fleet, monkeypatch):
-        """Gated mode is ticket-only: a leaked ?token= must not grant WS."""
+        """Gated mode defers to the host's canonical ticket gate: a leaked
+        ?token= must not grant WS."""
         fake_host = types.ModuleType("hermes_cli.web_server")
         fake_host._SESSION_TOKEN = "host-secret-not-for-ws-000000000000000"
         fake_gate = types.ModuleType("hermes_cli.web_server_chat")
@@ -333,13 +337,6 @@ class TestWsOriginAuth:
                     headers={"origin": "http://localhost:5173"},
                 ):
                     pass
-        # but a valid standalone ticket is accepted even in gated mode
-        ticket = plugin_api._mint_ws_ticket()
-        with TestClient(app) as client:
-            with client.websocket_connect(
-                f"{API}/events?ticket={ticket}", headers={"origin": "http://localhost:5173"}
-            ):
-                pass
 
 
 # ---------------------------------------------------------------------------
