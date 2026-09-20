@@ -5,7 +5,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to no strict versioning schedule — releases mark
 verified stability points of the audit-hardened kit.
 
-## [Unreleased]
+## [0.2.1] — 2026-09-20
+
+Completes the OCR full-repo remediation: the five remaining majors and the
+worth-fixing minors, verified on pinned core 3e09e5a15f (369/369 suite,
+desktop contract ALL PASS, red-on-base receipts per group).
 
 v0.2.1 follow-up from the OCR full-repo review (remaining majors +
 selected minors), verified on pinned core 3e09e5a15f. The probed
