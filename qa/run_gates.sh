@@ -56,15 +56,18 @@ MATRIX="qa/matrix.md"
 GATES_RUN_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 echo "== pytest: ${TARGETS} =="
-# M13: run the suite ONCE, keep the failure fatal. The old header embedded
-# a full pytest run in a command substitution (echo "== $(...pytest...) ==")
-# and echo's exit status hid that first run's failure under set -e — then
-# line two ran the whole suite again. Capturing the output for the matrix
-# append keeps the same fatality: under set -e the assignment itself
-# propagates pytest's failure and the script dies before any append.
-TEST_OUTPUT="$("$VENV_PY" -m pytest $TARGETS --tb=short -q)"
-echo "$TEST_OUTPUT"
-SUITE_TAIL="$(printf '%s\n' "$TEST_OUTPUT" | tail -1)"
+# M13: run the suite ONCE, keep the failure fatal AND its diagnostics
+# visible. The old header embedded a full pytest run in a command
+# substitution (echo "== $(...pytest...) ==") and echo's exit status hid
+# that run's failure under set -e — then line two ran the whole suite
+# again. Capturing into a variable would repeat the lost-diagnostics
+# half of that bug (set -e dies before the echo), so this streams
+# through tee: output is live, pipefail keeps pytest's status fatal,
+# and the matrix tail is read from the tee'd copy only on success.
+TEST_OUT="$(mktemp)"
+trap 'rm -f "${TEST_OUT}" "${CONTRACT_OUT:-}"' EXIT
+"$VENV_PY" -m pytest $TARGETS --tb=short -q 2>&1 | tee "${TEST_OUT}"
+SUITE_TAIL="$(tail -1 "${TEST_OUT}")"
 
 # -- Desktop plugin contract (SPEC-2 surface) --------------------------------
 # Fail-closed: a missing node runtime or missing test file is a gate FAILURE,
@@ -79,9 +82,9 @@ if [ ! -f "$CONTRACT_TEST" ]; then
     echo "FAIL  ${CONTRACT_TEST} not found — desktop contract cannot run (fail-closed)"
     exit 1
 fi
-CONTRACT_OUTPUT="$(node "$CONTRACT_TEST")"
-echo "$CONTRACT_OUTPUT"
-CONTRACT_TAIL="$(printf '%s\n' "$CONTRACT_OUTPUT" | tail -1)"
+CONTRACT_OUT="$(mktemp)"
+node "$CONTRACT_TEST" 2>&1 | tee "${CONTRACT_OUT}"
+CONTRACT_TAIL="$(tail -1 "${CONTRACT_OUT}")"
 
 # -- Matrix append (SPEC-3 §Evidence & process) ------------------------------
 # Reached ONLY on a fully green run (set -e died above otherwise): append
