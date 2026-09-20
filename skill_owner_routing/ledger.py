@@ -6,11 +6,18 @@ Canonical finding record (SPEC-0 Interface 3 — BINDING):
 {id, kind, severity, skill, expected_owner, actual, proposed_fix,
  discovered_at, status}
 kind ∈ {drifted, misplaced-global, unknown-owner, duplicate/hoarding, unowned}
+status ∈ {open, resolved, acknowledged}
 
 Fail-loud contract: a ledger that exists but cannot be read, parsed, or
 validated raises ``LedgerError``. Callers must surface the failure; a
 blind save after a failed load would permanently destroy
 resolved/acknowledged audit history (M5).
+
+Write-path contract (OCR minor family, M5-adjacent): every mutation runs
+load→mutate→save under the module lock (in-process serialization — the
+dashboard threadpool and the audit thread share this module), every save
+is validated through ``_valid()`` before it touches disk, and the status
+vocabulary is enforced at both write sites.
 """
 
 from __future__ import annotations
@@ -19,6 +26,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +39,14 @@ KINDS = {
     "duplicate/hoarding",
     "unowned",
 }
+
+STATUSES = {"open", "resolved", "acknowledged"}
+
+# Serializes every load→mutate→save critical section (upsert_findings,
+# update_status). The dashboard calls these from its threadpool and the
+# audit thread concurrently; last-writer-wins interleavings silently
+# dropped findings/resolutions (OCR minor: unserialized scan+resolve).
+_LOCK = threading.Lock()
 
 
 class LedgerError(RuntimeError):
@@ -93,7 +109,20 @@ def load_findings() -> List[Dict[str, Any]]:
 
 
 def save_findings(findings: List[Dict[str, Any]]) -> None:
-    """Atomic replace (temp + rename) — never a partial write."""
+    """Atomic replace (temp + rename) — never a partial write.
+
+    Every record is validated through ``_valid()`` BEFORE the write: a
+    shape the loader would reject must never reach disk (persist-then-
+    lose on next load, OCR minor).
+    """
+    invalid = [f for f in findings if not _valid(f)]
+    if invalid:
+        preview = json.dumps(invalid[0], default=str)[:120]
+        raise LedgerError(
+            f"skill-owner-routing: refusing to save {len(invalid)} invalid "
+            f"finding record(s) (first: {preview}) — a record the loader "
+            f"would reject must never be persisted."
+        )
     path = ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
@@ -118,37 +147,65 @@ def upsert_findings(new_findings: List[Dict[str, Any]]) -> Dict[str, int]:
     """Merge a scan's findings: deterministic ids make re-scans idempotent.
 
     Existing status ('resolved', 'acknowledged') is preserved for findings
-    that reappear; new ones enter as 'open'. Findings no longer present are
-    dropped from the ledger (the drift is gone).
+    that reappear; new ones enter as 'open' (stamped HERE, not left to
+    caller convention — a status-less record silently vanished from
+    counts and the preserve branch, OCR minor). Findings no longer
+    present are dropped from the ledger (the drift is gone).
 
-    Raises ``LedgerError`` when the existing ledger cannot be loaded —
-    the file is left untouched (never a destructive overwrite after a
-    failed read).
+    The whole load→merge→save runs under the module lock (in-process
+    serialization; see _LOCK). Raises ``LedgerError`` when the existing
+    ledger cannot be loaded — the file is left untouched (never a
+    destructive overwrite after a failed read).
     """
-    existing = {f["id"]: f for f in load_findings()}
-    merged: Dict[str, Any] = {}
-    for finding in new_findings:
-        prior = existing.get(finding["id"])
-        if prior is not None and prior.get("status") in {
-            "resolved",
-            "acknowledged",
-        }:
-            merged[finding["id"]] = {**finding, "status": prior["status"]}
-        else:
-            merged[finding["id"]] = finding
-    ordered = sorted(merged.values(), key=lambda f: (f.get("kind", ""), f.get("skill", "")))
-    save_findings(ordered)
-    return {"total": len(ordered), "open": sum(1 for f in ordered if f.get("status") == "open")}
+    with _LOCK:
+        existing = {f["id"]: f for f in load_findings()}
+        merged: Dict[str, Any] = {}
+        for finding in new_findings:
+            stamped = {**finding}
+            stamped.setdefault("status", "open")
+            prior = existing.get(stamped["id"])
+            if prior is not None and prior.get("status") in {
+                "resolved",
+                "acknowledged",
+            }:
+                merged[stamped["id"]] = {**stamped, "status": prior["status"]}
+            else:
+                merged[stamped["id"]] = stamped
+        ordered = sorted(
+            merged.values(), key=lambda f: (f.get("kind", ""), f.get("skill", ""))
+        )
+        save_findings(ordered)
+        return {
+            "total": len(ordered),
+            "open": sum(1 for f in ordered if f.get("status") == "open"),
+        }
 
 
 def update_status(finding_id: str, status: str) -> Optional[Dict[str, Any]]:
-    findings = load_findings()
-    for finding in findings:
-        if finding["id"] == finding_id:
-            finding["status"] = status
-            save_findings(sorted(findings, key=lambda f: (f.get("kind", ""), f.get("skill", ""))))
-            return finding
-    return None
+    """Set a finding's status; None when the id is unknown.
+
+    The status must come from the STATUSES vocabulary: a typo like
+    'RESOLVED' used to be accepted and made the finding invisible
+    everywhere (not 'open' for counts, not 'resolved' for the resolve
+    flow) while the next scan silently reverted it (OCR minor).
+    """
+    if status not in STATUSES:
+        raise ValueError(
+            f"Invalid finding status {status!r}. Valid statuses: "
+            f"{sorted(STATUSES)}."
+        )
+    with _LOCK:
+        findings = load_findings()
+        for finding in findings:
+            if finding["id"] == finding_id:
+                finding["status"] = status
+                save_findings(
+                    sorted(
+                        findings, key=lambda f: (f.get("kind", ""), f.get("skill", ""))
+                    )
+                )
+                return finding
+        return None
 
 
 def _valid(finding: Any) -> bool:
