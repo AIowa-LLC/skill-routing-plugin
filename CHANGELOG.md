@@ -5,6 +5,57 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to no strict versioning schedule — releases mark
 verified stability points of the audit-hardened kit.
 
+## [Unreleased]
+
+v0.2.1 follow-up from the OCR full-repo review (remaining majors +
+selected minors), verified on pinned core 3e09e5a15f. The probed
+`_scope_of` degenerate-path guard named in the triage was already
+covered by the M1/M2 commit on master (gate.py guard + test).
+
+### Concurrency & silent-degradation majors
+
+- Policy load under the lock (M4): `read_policy()` now runs the
+  cold-cache `_load()` under `_LOCK` (double-checked locking). `_load()`
+  mutates process-global home-override state; concurrent dashboard
+  threadpool readers could interleave set/reset (wrong-home read,
+  SPEC-1) or leave the override stuck on — and every racer repeated the
+  load. Stampede test pins exactly one load under 4 racing readers.
+- Home-override env fallback always pins (M7): when the core token
+  machinery is unavailable, `_home_override` now always sets
+  `HERMES_HOME` (the old code only set it when already set, silently
+  no-op'ing otherwise — engine calls then resolved the REAL fleet home,
+  the exact wrong-fleet read this module exists to prevent). Exit
+  restores the pre-entry state exactly, including "unset".
+- Drift parser failures are loud (M8): a broken frontmatter-parser
+  import now aborts the scan with RuntimeError (run_audit records
+  `state:failed`) instead of silently reclassifying every skill
+  fleet-wide as ownerless with zero logging; a single skill's parse
+  failure degrades that one skill only, with a warning naming the file.
+
+### QA gate integrity
+
+- Suite runs once (M13): the gate header embedded a full pytest run in
+  echo's command substitution — echo's exit status hid that run's
+  failure under `set -e`, and the suite ran twice. One run, fatal
+  status.
+- Fingerprint names the tested core (M14): the core fingerprint now
+  uses conftest's resolution (`SORE_CORE_ROOT` → home default); the
+  orphaned `HERMES_CORE` var + venv-dir fallback could fingerprint a
+  checkout the tests never ran against (observed live: fingerprint
+  said 03fee43ca3 while the suite ran pinned 3e09e5a15f).
+
+### Minors
+
+- Unparseable config warns (policy): core's `load_config` never raises
+  on broken YAML (serves defaults), so a corrupt config that says
+  `enabled: false` silently re-ENABLED routing. Degrade-to-defaults is
+  kept (a typo must not freeze mutations) but now logs a loud warning
+  naming the file; a merely-absent key stays silent (documented
+  default-ON divergence).
+- Containment-skip warning rate-limited (drift): the bounded
+  `_skip_warns` list never gated the logging — every symlinked/escaping
+  skill path logged a warning per scan. Now once per 60s window.
+
 ## [0.2.0] — 2026-09-19
 
 Pre-release repairs from the OCR full-repo review at v0.2.0-RC (d1659fb),
