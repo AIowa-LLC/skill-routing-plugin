@@ -60,11 +60,16 @@ def read_policy() -> Dict[str, Any]:
         cached = _CACHE.get(key)
         if cached is not None and cached[0] == fingerprint:
             return dict(cached[1])
-
-    policy = _load(home, path)
-    with _LOCK:
+        # Load UNDER the lock (double-checked locking, OCR M4): _load()
+        # mutates process-global home-override state (set/reset token, and
+        # a process-global env fallback on cores without the token
+        # machinery) — concurrent dashboard threadpool readers interleaving
+        # set/reset outside a lock can read the wrong home (SPEC-1) or
+        # leave the override stuck on. Loads are rare (cache miss only),
+        # so serializing them is free.
+        policy = _load(home, path)
         _CACHE[key] = (fingerprint, dict(policy))
-    return policy
+        return policy
 
 
 def _load(home, path) -> Dict[str, Any]:

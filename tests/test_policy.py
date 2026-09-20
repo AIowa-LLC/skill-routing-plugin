@@ -94,3 +94,51 @@ class TestPolicyContract:
             "skills:\n  owner_routing:\n    enabled: false\n", encoding="utf-8"
         )
         assert _read_policy()["enabled"] is False
+
+
+class TestConcurrentReads:
+    """M4 — _load() must run under _LOCK (double-checked locking).
+
+    _load() flips process-global home-override state; concurrent cold-cache
+    readers running it outside the lock interleave set/reset (wrong-home
+    reads, stuck override) and redundantly repeat the load. Post-fix, a
+    cache miss loads once under the lock and every other waiter gets the
+    cached dict.
+    """
+
+    def test_cold_cache_stampede_loads_once(self, fleet, monkeypatch):
+        import threading
+        import time
+
+        from skill_owner_routing import policy
+
+        calls = []
+        real_load = policy._load
+
+        def slow_load(home, path):
+            calls.append(threading.get_ident())
+            time.sleep(0.08)  # widen the window where the cache is still empty
+            return real_load(home, path)
+
+        monkeypatch.setattr(policy, "_load", slow_load)
+
+        results = {}
+        errors = []
+
+        def reader(i):
+            try:
+                results[i] = policy.read_policy()
+            except Exception as exc:  # pragma: no cover — surfaced below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=reader, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+            time.sleep(0.01)  # stagger so later threads miss the cache too
+        for t in threads:
+            t.join()
+
+        assert not errors
+        assert len(calls) == 1, f"expected exactly one load, got {len(calls)}"
+        assert len({id(r) for r in results.values()}) == 4  # independent dicts
+        assert all(r["enabled"] is True for r in results.values())
