@@ -5,10 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to no strict versioning schedule — releases mark
 verified stability points of the audit-hardened kit.
 
-## [Unreleased]
+## [0.2.0] — 2026-09-19
 
 Pre-release repairs from the OCR full-repo review at v0.2.0-RC (d1659fb),
-stacked for the v0.2.0 gate.
+verified on pinned core 3e09e5a15f (298/298, red-on-base proven).
 
 ### Gate fail-closed posture (2026-09-19 ruling)
 
