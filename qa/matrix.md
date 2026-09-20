@@ -376,3 +376,10 @@ bash qa/run_gates.sh                                                  # fingerpr
 core v0.21.2 @ 3e09e5a15f: suite 205 passed + 0 xfail ×2, desktop contract
 ALL PASS ×2, full post-audit lane coverage with per-lane QA verdicts.
 Certification baseline re-defined from this run forward.
+
+## Gate run 2026-09-20T07:04:12Z — plugin e7b7c9c (auto-appended)
+
+- core: `3e09e5a15f` — plugin: `e7b7c9c` (dirty: 0) — Linux 7.2.5-3-omarchy / Python 3.11.16
+- suite: `369 passed in 4.40s`
+- desktop contract: `ALL PASS`
+- verdict: **PASS** (auto-appended by qa/run_gates.sh; failures never append)
