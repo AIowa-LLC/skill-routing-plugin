@@ -50,13 +50,47 @@ def scan() -> Dict[str, Any]:
     counts = ledger_mod.upsert_findings(findings)
     from .index import update_index
 
-    update_index({e["skill"]: e["path"] for e in catalog})
+    update_index(_index_entries(catalog))
     return {
         "run_id": run_id,
         "scanned": scanned,
         "findings": findings,
         "counts": counts,
     }
+
+
+def _index_entries(catalog: List[Dict[str, Any]]) -> Dict[str, str]:
+    """name -> SKILL.md path for the mutation index, deterministic on
+    duplicate names.
+
+    A fleet can hold the same skill name globally AND in a profile (the
+    duplicate/hoarding finding flags it). The plain dict comprehension
+    used here collapsed those order-dependently — lexicographically-last
+    profile copy silently won, global copy dropped — backing the
+    mutation-gate target resolution with an arbitrary choice. First
+    occurrence wins instead (the homes order is deterministic: default
+    first, then sorted profiles — same preference build_index_from_scan's
+    ``setdefault`` already encodes), and every collision is logged.
+    """
+    entries: Dict[str, str] = {}
+    dups: Dict[str, str] = {}
+    for entry in catalog:
+        name, path = entry["skill"], entry["path"]
+        if name in entries:
+            if entries[name] != path:
+                dups[name] = path
+            continue
+        entries[name] = path
+    for name, path in dups.items():
+        logger.warning(
+            "skill-owner-routing: skill name %r exists in multiple homes "
+            "(indexing %r; also seen at %r — duplicate/hoarding finding "
+            "flags the twin)",
+            name,
+            entries[name],
+            path,
+        )
+    return entries
 
 
 def declared_skill_owner_from(frontmatter: Dict[str, Any]) -> Optional[str]:
@@ -134,8 +168,18 @@ def _skills_in(home: Path) -> List[Tuple[str, Path]]:
         try:
             if not child.is_dir() or child.name.startswith("."):
                 continue
-            if child.is_symlink() and not _resolves_within(child, home):
-                continue  # alias to another home's skill — counted there, not here
+            if child.is_symlink():
+                # M11 containment (see _contained_skill_md): a SKILL.md
+                # reached through ANY symlink component is never indexed.
+                # The old guard here only skipped symlinks resolving
+                # OUTSIDE the home — within-home symlinked dirs passed,
+                # then _contained_skill_md rejected them two lines later:
+                # an admitted-but-guaranteed-dropped branch (plus a
+                # spurious containment warning per alias). One policy:
+                # symlinked skill dirs are skipped outright, wherever
+                # they point; the physical copy is scanned at its
+                # canonical home.
+                continue
             skill_md = child / "SKILL.md"
             if skill_md.is_file():
                 if _contained_skill_md(home, skill_md):
@@ -150,14 +194,14 @@ def _skills_in(home: Path) -> List[Tuple[str, Path]]:
             try:
                 if not grandchild.is_dir():
                     continue
-                if grandchild.is_symlink() and not _resolves_within(grandchild, home):
-                    continue  # alias to another home's skill
+                if grandchild.is_symlink():
+                    continue  # M11: same symlink-component rule as above
                 nested = grandchild / "SKILL.md"
                 if nested.is_file():
                     if _contained_skill_md(home, nested):
                         found.append((grandchild.name, nested))
             except OSError:
-                continue  # unreadable/undiscoverable — skip this grandchild only
+                continue  # unreadable — skip this grandchild only
     return found
 
 
@@ -218,13 +262,6 @@ def _warn_skip() -> None:
         "enabled for the full list",
         len(_skip_warns),
     )
-
-
-def _resolves_within(path: Path, root: Path) -> bool:
-    try:
-        return path.resolve().is_relative_to(root.resolve())
-    except OSError:
-        return False
 
 
 def _read(skill_md: Path) -> Tuple[Dict[str, Any], str]:
