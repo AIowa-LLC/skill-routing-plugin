@@ -214,14 +214,37 @@ def _read(skill_md: Path) -> Tuple[Dict[str, Any], str]:
         content = skill_md.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}, ""
+    # M8: the parser import is environment health, the parse call is
+    # per-skill content. They must not share an except — a broken parser
+    # import used to degrade EVERY skill to empty frontmatter with zero
+    # logging: the whole fleet silently reclassified ownerless (drift
+    # findings suppressed, spurious hoarding lints) while run_audit still
+    # reported ok:true. An unparseable parser is a watchdog malfunction:
+    # fail the scan loudly. A single unparseable SKILL.md degrades that
+    # one skill only, with a logged warning naming the file.
     try:
         from agent.skill_utils import parse_frontmatter
-
+    except Exception as exc:
+        logger.exception(
+            "skill-owner-routing: frontmatter parser unavailable — "
+            "drift scan cannot classify ownership and must not report "
+            "official-looking results"
+        )
+        raise RuntimeError(
+            "skill-owner-routing drift scan: frontmatter parser "
+            f"unavailable ({type(exc).__name__}) — aborting scan"
+        ) from exc
+    try:
         frontmatter, body = parse_frontmatter(content)
         if not isinstance(frontmatter, dict):
             frontmatter = {}
         return frontmatter, body
     except Exception:
+        logger.warning(
+            "skill-owner-routing: frontmatter parse failed for %s; "
+            "treating this skill as metadata-less for this scan",
+            skill_md,
+        )
         return {}, content
 
 

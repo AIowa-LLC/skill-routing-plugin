@@ -3,6 +3,7 @@
 Copyright (c) 2026 skill-owner-routing contributors. MIT licensed.
 """
 
+import builtins
 import json
 
 from conftest import write_skill
@@ -453,3 +454,75 @@ def _core_disabled() -> bool:
         return not policy.get("enabled")
     except Exception:
         return True
+
+
+class TestParserFailureLoud:
+    """M8 — parser-import failure must fail the scan, never silently
+    reclassify the fleet ownerless.
+
+    Old behavior: _read() caught the import AND the parse in one except and
+    degraded every skill to empty frontmatter with zero logging — drift
+    findings suppressed, spurious hoarding lints, run_audit still
+    ok:true. New contract: import failure raises (watchdog malfunction);
+    a single skill's parse failure degrades that one skill only, logged.
+    """
+
+    def test_parser_import_failure_raises_not_silent_ownerless(
+        self, fleet, monkeypatch, caplog
+    ):
+        import logging
+
+        import pytest
+
+        from skill_owner_routing import drift
+
+        write_skill(fleet["trt"], "trt-skill", owner="trt")
+
+        real_import = builtins.__import__
+
+        def broken_import(name, *a, **k):
+            if name == "agent.skill_utils":
+                raise ImportError("parser gone")
+            return real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", broken_import)
+        with caplog.at_level(logging.ERROR, logger="skill_owner_routing.drift"):
+            with pytest.raises(RuntimeError, match="frontmatter parser unavailable"):
+                drift.scan()
+        assert any("parser unavailable" in r.message for r in caplog.records)
+
+    def test_single_skill_parse_failure_degrades_that_skill_only(
+        self, fleet, monkeypatch, caplog
+    ):
+        import logging
+
+        import agent.skill_utils as su
+        from skill_owner_routing import drift
+
+        # good-skill is MISPLACED (owner trt, lives in growth) so its drift
+        # finding proves classification survived the sibling's crash.
+        write_skill(fleet["growth"], "good-skill", owner="trt")
+        bad = fleet["root"] / "skills" / "bad-skill"
+        bad.mkdir(parents=True, exist_ok=True)
+        (bad / "SKILL.md").write_text(
+            "---\nname: bad-skill\n---\n\nbody\n", encoding="utf-8"
+        )
+        real_parse = su.parse_frontmatter
+
+        def parse_that_blows_up_on_bad(content):
+            if "bad-skill" in content:
+                raise ValueError("simulated parser crash")
+            return real_parse(content)
+
+        monkeypatch.setattr(su, "parse_frontmatter", parse_that_blows_up_on_bad)
+        with caplog.at_level(logging.WARNING, logger="skill_owner_routing.drift"):
+            result = drift.scan()
+        # Scan completes; both skills scanned; the crash degraded ONLY the
+        # bad skill (logged, named), the good skill keeps its drift finding.
+        assert result["scanned"] == 2
+        assert any(
+            "parse failed for" in r.message and "bad-skill" in r.getMessage()
+            for r in caplog.records
+        )
+        assert any(f["skill"] == "good-skill" and f["kind"] == "drifted"
+                   for f in result["findings"])
