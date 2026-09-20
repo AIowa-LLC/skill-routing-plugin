@@ -12,7 +12,10 @@ not the caller's.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Dict
+
+logger = logging.getLogger(__name__)
 
 
 def routed_create(
@@ -142,16 +145,38 @@ def _plain_create(
 def _active_profile() -> "str | None":
     try:
         from hermes_cli.profiles import get_active_profile_name
-
-        raw = get_active_profile_name() or "default"
-        from .frontmatter import resolve_owner_identity
-
-        normalized, err = resolve_owner_identity(raw)
-        if err is not None:
-            return raw.strip().lower() or None
-        return normalized
     except Exception:
+        logger.exception(
+            "skill-owner-routing: could not import hermes_cli.profiles to "
+            "resolve the active profile"
+        )
         return None
+    try:
+        raw = get_active_profile_name() or "default"
+    except Exception:
+        logger.exception(
+            "skill-owner-routing: get_active_profile_name() raised while "
+            "resolving the active profile"
+        )
+        return None
+    from .frontmatter import resolve_owner_identity
+
+    normalized, err = resolve_owner_identity(raw)
+    if err is not None:
+        # Deny-on-unresolvable (2026-09-19 fail-closed ruling, same
+        # family as gate M1): the raw name failed core's own
+        # normalize/validate — guessing a fallback normalization (the
+        # old ``raw.strip().lower()``) would compare two DIFFERENT
+        # normalization regimes against the owner id and can mis-route
+        # the create. Surface the failure instead.
+        logger.error(
+            "skill-owner-routing: active profile name %r failed identity "
+            "resolution (%s); refusing to guess a normalization",
+            raw,
+            err,
+        )
+        return None
+    return normalized
 
 
 def _profile_exists(owner: str) -> bool:
@@ -160,6 +185,11 @@ def _profile_exists(owner: str) -> bool:
 
         return bool(profile_exists(owner))
     except Exception:
+        logger.exception(
+            "skill-owner-routing: profile_exists(%r) raised — treating as "
+            "not registered (fail-closed)",
+            owner,
+        )
         return False
 
 
@@ -173,7 +203,15 @@ def _scoped_create_in_owner(
 ) -> str:
     """The routed transaction: scope HERMES_HOME to the owner for BOTH the
     create and the post-write bookkeeping, then restore. Ported from
-    e12d79edd1 (create + post-write token scope)."""
+    e12d79edd1 (create + post-write token scope).
+
+    The whole override window runs inside a broad except: this function
+    returns a JSON string to the tool caller (register.py hands the
+    return value straight through), so a raw exception escaping the
+    window broke the tool contract (OCR minor) — and would have unwound
+    THROUGH the finally-reset before propagating, leaking nothing but
+    surfacing wrong. Malfunctions now return a JSON error object with
+    the exception class only (never internals)."""
     import logging
 
     logger = logging.getLogger(__name__)
@@ -183,8 +221,22 @@ def _scoped_create_in_owner(
     )
     from hermes_cli.profiles import get_profile_dir
 
-    target_home = get_profile_dir(owner)
-    token = set_hermes_home_override(target_home)
+    try:
+        target_home = get_profile_dir(owner)
+        token = set_hermes_home_override(target_home)
+    except Exception as exc:
+        logger.exception("skill-owner-routing: could not enter the owner override")
+        return json.dumps(
+            {
+                "success": False,
+                "error": (
+                    f"Routed create failed before entering the owner "
+                    f"profile override ({type(exc).__name__}). Nothing was "
+                    f"written."
+                ),
+            },
+            ensure_ascii=False,
+        )
     try:
         result_json = _plain_create(name, content, category, task_id, session_id)
         try:
@@ -209,5 +261,31 @@ def _scoped_create_in_owner(
             owner,
         )
         return json.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        # Tool contract: this function always returns a JSON string; a
+        # raw exception broke callers that json.loads the result. Only
+        # the exception CLASS is exposed, never its message or inputs.
+        logger.exception("skill-owner-routing: routed create failed mid-transaction")
+        return json.dumps(
+            {
+                "success": False,
+                "error": (
+                    f"Routed create failed mid-transaction "
+                    f"({type(exc).__name__}). The home override was "
+                    f"restored; check engine logs."
+                ),
+            },
+            ensure_ascii=False,
+        )
     finally:
-        reset_hermes_home_override(token)
+        try:
+            reset_hermes_home_override(token)
+        except Exception:
+            # The override token machinery failing to unwind would leak
+            # the process-scoped override — log it loudly rather than
+            # swallowing silently (the finally must not mask the return).
+            logger.exception(
+                "skill-owner-routing: FAILED to reset the home override "
+                "after a routed create — subsequent reads may see the "
+                "owner home instead of the caller's"
+            )
