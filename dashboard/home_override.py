@@ -36,7 +36,13 @@ def _home_override(home: Path) -> Iterator[None]:
     except Exception:
         token = None
     prev_env = os.environ.get("HERMES_HOME")
-    if token is None and prev_env is not None:
+    if token is None:
+        # M7: when the token machinery is unavailable the env var is the
+        # only remaining lever, so it must ALWAYS be pinned — including
+        # when HERMES_HOME was not already set. The old ``prev_env is not
+        # None`` guard silently no-oped in exactly that case, and engine
+        # calls then resolved the REAL fleet home instead of the intended
+        # one — the wrong-fleet read this module exists to prevent.
         os.environ["HERMES_HOME"] = str(home)
     try:
         yield
@@ -46,8 +52,13 @@ def _home_override(home: Path) -> Iterator[None]:
                 reset_hermes_home_override(token)
             except Exception:
                 pass
-        elif prev_env is not None:
-            os.environ["HERMES_HOME"] = prev_env
+        else:
+            # Restore the pre-entry env state exactly — including
+            # "unset" (prev_env None), which the old code never touched.
+            if prev_env is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = prev_env
         try:
             from skill_owner_routing.common import reset_caches
 
