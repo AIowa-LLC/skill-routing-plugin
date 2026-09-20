@@ -41,8 +41,6 @@ def core_policy_enabled() -> bool:
     Reuses core's reader when present so we read exactly what core enforces;
     the mtime-cached DEFAULT-home config read covers the rest.
     """
-    from .common import fleet_default_home
-
     try:
         import tools.skill_manager_tool as smt  # type: ignore[import-not-found]
 
@@ -56,7 +54,9 @@ def core_policy_enabled() -> bool:
         # says disabled — core is NOT enforcing; plugin must stay active.
         return False
     except Exception:
-        del fleet_default_home  # probe is best-effort; never raises
+        # Probe is best-effort; never raises. (The historical
+        # ``del fleet_default_home`` here was a lint-silencing no-op tied
+        # to a dead import — both removed.)
         return False
 
 
@@ -66,6 +66,11 @@ def create_gate_dormant() -> bool:
     Both conditions true → dormant. The probe cache is time-boxed (not
     permanent) so a core downgrade reactivates the plugin gate on the next
     decision — no zombie dormancy (SPEC-3 D5c).
+
+    A dormancy EPOCH FLIP (active→dormant or dormant→active) resets the
+    log-once flag: the old code left ``logged`` True forever, so the
+    second dormancy epoch was never announced — the gate silently went
+    dormant again with zero log lines.
     """
     import time
 
@@ -78,6 +83,9 @@ def create_gate_dormant() -> bool:
     state = _DORMANT_STATE.setdefault(
         "create", {"dormant": dormant, "logged": False}
     )
+    if state["dormant"] != dormant:
+        # epoch flip: re-arm the log-once announcement for the new epoch
+        state["logged"] = False
     state["dormant"] = dormant
     return dormant
 

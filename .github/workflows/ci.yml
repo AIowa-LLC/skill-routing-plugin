@@ -15,6 +15,15 @@ on:
     branches: ["**"]
   pull_request:
 
+# Least privilege: nothing in this workflow needs write access.
+permissions:
+  contents: read
+
+# One run per ref; superseded runs are cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   SORE_CORE_ROOT: ${{ github.workspace }}/hermes-core
   HERMES_CORE_PIN: 3e09e5a15f43e7253abaf4760f0487fece39ff93  # v0.21.2 (Run-5 pin)
@@ -22,6 +31,7 @@ env:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +45,7 @@ jobs:
           pip install pytest fastapi httpx pydantic pyyaml
 
       - name: Fetch pinned hermes core
+        timeout-minutes: 5
         run: |
           git clone --filter=blob:none --no-checkout https://github.com/NousResearch/hermes-agent.git hermes-core
           git -C hermes-core fetch --depth=1 origin "$HERMES_CORE_PIN"
@@ -52,6 +63,7 @@ jobs:
 
   desktop-contract:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 

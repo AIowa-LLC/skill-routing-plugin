@@ -4,3 +4,18 @@ __pycache__/
 .venv/
 node_modules/
 *.egg-info/
+
+# secrets — defensive: never let a credential land in a commit
+# (the product is token-auth; keep the reflex enforced)
+.env
+.env.*
+*.pem
+*.key
+*.token
+
+# coverage / build artifacts
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/

@@ -86,8 +86,15 @@ TEST_SESSION_HEADER = "X-Hermes-Session-Token"
 
 @pytest.fixture(scope="session", autouse=True)
 def _security_contract_token():
-    os.environ.setdefault("HERMES_DASHBOARD_SESSION_TOKEN", TEST_SESSION_TOKEN)
+    # Hard-set, not setdefault: a foreign HERMES_DASHBOARD_SESSION_TOKEN
+    # leaking in from the environment used to override the suite token,
+    # breaking auth for every test AND inverting the wrong-credential
+    # cases (the "wrong" token was the configured one). The suite owns
+    # this variable for its lifetime.
+    os.environ["HERMES_DASHBOARD_SESSION_TOKEN"] = TEST_SESSION_TOKEN
     yield
+    # restoration is unnecessary: pytest owns the process; nothing after
+    # the session reads this variable expecting the caller's value.
 
 
 @pytest.fixture()

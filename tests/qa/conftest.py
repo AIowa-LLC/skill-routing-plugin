@@ -50,8 +50,14 @@ def core_root() -> Path:
 
 @pytest.fixture(scope="session")
 def core_commit() -> str:
-    out = subprocess.run(
-        ["git", "-C", str(CORE), "rev-parse", "--short", "HEAD"],
-        capture_output=True, text=True, check=True,
-    )
+    # Skip (not error) when git or the core checkout is unavailable —
+    # consistent with core_root's guard. A missing environment should
+    # deselect the pin-dependent tests, not error the whole session.
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(CORE), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pytest.skip("hermes core checkout not probeable (git unavailable or not a repo)")
     return out.stdout.strip()
